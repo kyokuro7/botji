@@ -1,17 +1,11 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BotSimulator from '../components/BotSimulator';
 import { buildPreview, extractBotJson, parseFiles, splitReply } from '../lib/files';
 import { WEBSITE_SYSTEM, getBotSystem, getClarifySystem } from '../lib/prompts';
-
-const DEFAULT_SETTINGS = {
-  provider: 'openai',
-  baseUrl: '',
-  model: 'gpt-4o-mini',
-  apiKey: '',
-  askFirst: true
-};
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../lib/settings';
 
 const FENCE = '```';
 const EXPORT_APP = 'xagent-ai-studio';
@@ -88,15 +82,16 @@ export default function Page() {
   const [clarify, setClarify] = useState(null);
   const [tab, setTab] = useState('preview');
   const [activeFile, setActiveFile] = useState(0);
-  const [showSettings, setShowSettings] = useState(true);
+  const [hydrated, setHydrated] = useState(false);
+  const [mobileView, setMobileView] = useState('chat');
+  const [menuOpen, setMenuOpen] = useState(false);
   const [rawOutput, setRawOutput] = useState('');
   const chatRef = useRef(null);
   const importRef = useRef(null);
 
   useEffect(() => {
+    setSettings(loadSettings());
     try {
-      const saved = localStorage.getItem('xagent.settings');
-      if (saved) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(saved) });
       const savedChat = localStorage.getItem('xagent.chat');
       if (savedChat) {
         const c = JSON.parse(savedChat);
@@ -109,23 +104,17 @@ export default function Page() {
     } catch (e) {
       // localStorage rusak, abaikan
     }
+    setHydrated(true);
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem('xagent.settings', JSON.stringify(settings));
-    } catch (e) {
-      // storage penuh / diblokir
-    }
-  }, [settings]);
-
-  useEffect(() => {
+    if (!hydrated) return;
     try {
       localStorage.setItem('xagent.chat', JSON.stringify({ messages, files, bot, mode, botLang }));
     } catch (e) {
       // storage penuh / diblokir
     }
-  }, [messages, files, bot, mode, botLang]);
+  }, [hydrated, messages, files, bot, mode, botLang]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
@@ -134,7 +123,9 @@ export default function Page() {
   const previewHtml = useMemo(() => buildPreview(files), [files]);
 
   function update(field, value) {
-    setSettings((prev) => ({ ...prev, [field]: value }));
+    const next = { ...settings, [field]: value };
+    setSettings(next);
+    saveSettings(next);
   }
 
   function newChat() {
@@ -148,6 +139,7 @@ export default function Page() {
     setAsking(false);
     setActiveFile(0);
     setTab('preview');
+    setMobileView('chat');
   }
 
   function switchMode(next) {
@@ -209,13 +201,11 @@ export default function Page() {
     if (!text || busy || asking || clarify) return;
 
     if (!settings.apiKey.trim()) {
-      setError('API key belum diisi.');
-      setShowSettings(true);
+      setError('API key belum diisi. Buka Setelan untuk mengisinya.');
       return;
     }
     if (!settings.model.trim()) {
-      setError('Model belum diisi.');
-      setShowSettings(true);
+      setError('Model belum diisi. Buka Setelan untuk mengisinya.');
       return;
     }
 
@@ -517,30 +507,37 @@ export default function Page() {
           </button>
         </div>
 
-        {mode === 'telegram' && (
-          <select
-            value={botLang}
-            onChange={(e) => setBotLang(e.target.value)}
-            title="Bahasa kode bot"
-            style={{ width: 'auto' }}
-          >
-            <option value="auto">Bahasa: ikuti permintaan</option>
-            <option value="javascript">JavaScript (index.js)</option>
-            <option value="python">Python (bot.py)</option>
-          </select>
-        )}
-
         <div className="spacer" />
 
-        <button type="button" className="btn ghost" onClick={() => setShowSettings((v) => !v)}>
-          {showSettings ? 'Tutup setelan' : 'Setelan'}
+        <button
+          type="button"
+          className="btn ghost menu-btn"
+          aria-label="Menu"
+          onClick={() => setMenuOpen((v) => !v)}
+        >
+          ⋯
         </button>
-        <button type="button" className="btn ghost" onClick={exportChat} disabled={messages.length === 0}>
-          Export chat
-        </button>
-        <button type="button" className="btn ghost" onClick={() => importRef.current && importRef.current.click()} disabled={busy}>
-          Import chat
-        </button>
+
+        <div className={`actions ${menuOpen ? 'open' : ''}`} onClick={() => setMenuOpen(false)}>
+          <Link href="/settings" className="btn ghost">
+            Setelan
+          </Link>
+          <button type="button" className="btn ghost" onClick={exportChat} disabled={messages.length === 0}>
+            Export chat
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => importRef.current && importRef.current.click()}
+            disabled={busy || asking}
+          >
+            Import chat
+          </button>
+          <button type="button" className="btn ghost" onClick={newChat}>
+            Chat baru
+          </button>
+        </div>
+
         <input
           ref={importRef}
           type="file"
@@ -548,65 +545,16 @@ export default function Page() {
           onChange={importChat}
           style={{ display: 'none' }}
         />
-        <button type="button" className="btn ghost" onClick={newChat}>
-          Chat baru
-        </button>
       </div>
 
-      {showSettings && (
-        <>
-          <div className="settings">
-            <div className="field">
-              <label>Provider</label>
-              <select
-                value={settings.provider}
-                onChange={(e) => update('provider', e.target.value)}
-              >
-                <option value="openai">OpenAI / OpenAI-compatible</option>
-                <option value="anthropic">Anthropic</option>
-              </select>
-            </div>
-
-            <div className="field">
-              <label>Model</label>
-              <input
-                value={settings.model}
-                onChange={(e) => update('model', e.target.value)}
-                placeholder={settings.provider === 'anthropic' ? 'claude-3-5-sonnet-latest' : 'gpt-4o-mini'}
-              />
-            </div>
-
-            <div className="field">
-              <label>API Key</label>
-              <input
-                type="password"
-                value={settings.apiKey}
-                onChange={(e) => update('apiKey', e.target.value)}
-                placeholder="sk-..."
-                autoComplete="off"
-              />
-            </div>
-
-            {settings.provider === 'openai' && (
-              <div className="field">
-                <label>Base URL (opsional)</label>
-                <input
-                  value={settings.baseUrl}
-                  onChange={(e) => update('baseUrl', e.target.value)}
-                  placeholder="https://api.openai.com/v1"
-                />
-              </div>
-            )}
-          </div>
-          <div className="hint">
-            Key disimpan di localStorage browser ini dan hanya diteruskan ke serverless proxy untuk memanggil provider.
-            Tidak ditulis ke database atau log server.
-          </div>
-        </>
+      {hydrated && !settings.apiKey.trim() && (
+        <div className="notice">
+          API key belum diisi. <Link href="/settings">Buka Setelan</Link>
+        </div>
       )}
 
-      <div className="main">
-        <div className="panel">
+      <div className="main" data-view={mobileView}>
+        <div className="panel panel-chat">
           <div className="panel-head">Chat</div>
 
           <div className="chat" ref={chatRef}>
@@ -703,6 +651,18 @@ export default function Page() {
               }}
             />
             <div className="composer-row">
+              {mode === 'telegram' && (
+                <select
+                  className="lang-select"
+                  value={botLang}
+                  onChange={(e) => setBotLang(e.target.value)}
+                  title="Bahasa kode bot"
+                >
+                  <option value="auto">Bahasa: auto</option>
+                  <option value="javascript">JavaScript</option>
+                  <option value="python">Python</option>
+                </select>
+              )}
               <label style={{ fontSize: 12, color: '#7d879c', display: 'flex', gap: 6, alignItems: 'center' }}>
                 <input
                   type="checkbox"
@@ -724,7 +684,7 @@ export default function Page() {
           </div>
         </div>
 
-        <div className="panel">
+        <div className="panel panel-result">
           <div className="panel-head">
             <div className="tabs">
               <button
@@ -803,6 +763,36 @@ export default function Page() {
           )}
         </div>
       </div>
+
+      <nav className="mobile-nav">
+        <button
+          type="button"
+          className={mobileView === 'chat' ? 'active' : ''}
+          onClick={() => setMobileView('chat')}
+        >
+          Chat
+        </button>
+        <button
+          type="button"
+          className={mobileView === 'result' && tab === 'preview' ? 'active' : ''}
+          onClick={() => {
+            setTab('preview');
+            setMobileView('result');
+          }}
+        >
+          Preview
+        </button>
+        <button
+          type="button"
+          className={mobileView === 'result' && tab === 'code' ? 'active' : ''}
+          onClick={() => {
+            setTab('code');
+            setMobileView('result');
+          }}
+        >
+          Kode{files.length > 0 ? ` (${files.length})` : ''}
+        </button>
+      </nav>
     </div>
   );
 }

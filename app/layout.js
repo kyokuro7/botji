@@ -5,6 +5,12 @@ export const metadata = {
   description: 'Generate kode pakai AI, langsung lihat preview.'
 };
 
+export const viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  themeColor: '#12151c'
+};
+
 export default function RootLayout({ children }) {
   return (
     <html lang="id">
