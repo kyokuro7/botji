@@ -1,12 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { skillsForMode } from '../lib/skills';
+import { importSkillsFromGitHub, skillsForMode } from '../lib/skills';
 
 const EMPTY = { id: '', name: '', desc: '', instruction: '', scope: 'all' };
 
 export default function SkillsModal({ mode, state, onChange, onClose }) {
   const [form, setForm] = useState(null);
+  const [ghUrl, setGhUrl] = useState('');
+  const [ghBusy, setGhBusy] = useState(false);
+  const [ghError, setGhError] = useState('');
+  const [ghResult, setGhResult] = useState([]);
 
   const list = skillsForMode(mode, state.custom);
 
@@ -39,6 +43,53 @@ export default function SkillsModal({ mode, state, onChange, onClose }) {
       active: state.active.filter((x) => x !== id),
       custom: state.custom.filter((s) => s.id !== id)
     });
+  }
+
+  function applySkills(items) {
+    if (!Array.isArray(items) || items.length === 0) return;
+    const custom = state.custom.slice();
+    const active = state.active.slice();
+
+    for (const s of items) {
+      const idx = custom.findIndex((x) => x.id === s.id || (x.source && x.source === s.source));
+      if (idx >= 0) {
+        const keepId = custom[idx].id;
+        custom[idx] = { ...s, id: keepId };
+        if (!active.includes(keepId)) active.push(keepId);
+      } else {
+        custom.push(s);
+        if (!active.includes(s.id)) active.push(s.id);
+      }
+    }
+
+    onChange({ active, custom });
+  }
+
+  async function loadGithub() {
+    const url = ghUrl.trim();
+    if (!url || ghBusy) return;
+    setGhBusy(true);
+    setGhError('');
+    setGhResult([]);
+    try {
+      const found = await importSkillsFromGitHub(url);
+      setGhResult(found);
+    } catch (e) {
+      setGhError(e.message || 'Gagal mengambil dari GitHub.');
+    } finally {
+      setGhBusy(false);
+    }
+  }
+
+  function importOne(skill) {
+    applySkills([skill]);
+    setGhResult((prev) => prev.filter((s) => s.id !== skill.id));
+  }
+
+  function importAll() {
+    applySkills(ghResult);
+    setGhResult([]);
+    setGhUrl('');
   }
 
   const activeCount = list.filter((s) => state.active.includes(s.id)).length;
@@ -88,9 +139,62 @@ export default function SkillsModal({ mode, state, onChange, onClose }) {
                   );
                 })}
               </div>
+
               <button type="button" className="btn" onClick={() => setForm({ ...EMPTY })}>
                 + Buat skill sendiri
               </button>
+
+              <div className="gh-box">
+                <div className="gh-title">Impor dari GitHub</div>
+                <div className="gh-row">
+                  <input
+                    value={ghUrl}
+                    onChange={(e) => setGhUrl(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        loadGithub();
+                      }
+                    }}
+                    placeholder="https://github.com/user/repo/blob/main/SKILL.md"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <button type="button" className="btn ghost sm" onClick={loadGithub} disabled={ghBusy || !ghUrl.trim()}>
+                    {ghBusy ? 'Mengambil...' : 'Ambil'}
+                  </button>
+                </div>
+                <div className="gh-hint">
+                  Bisa URL file .md, folder skill, root repo, atau gist. Repo dibaca lewat api.github.com (maks 60 permintaan per jam tanpa token).
+                </div>
+
+                {ghError && <div className="gh-err">{ghError}</div>}
+
+                {ghResult.length > 0 && (
+                  <div className="gh-found">
+                    <div className="gh-found-head">
+                      <span>{ghResult.length} skill ditemukan</span>
+                      <button type="button" className="btn ghost sm" onClick={importAll}>
+                        Impor semua
+                      </button>
+                    </div>
+                    <div className="gh-list">
+                      {ghResult.map((s) => (
+                        <div key={s.id} className="gh-item">
+                          <div className="gh-item-main">
+                            <b>{s.name}</b>
+                            <small>{s.desc || s.instruction.slice(0, 70)}</small>
+                          </div>
+                          <button type="button" className="btn ghost sm" onClick={() => importOne(s)}>
+                            Impor
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </>
           )}
 
