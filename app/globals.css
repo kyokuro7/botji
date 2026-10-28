@@ -398,3 +398,80 @@ pre.code {
   text-align: left;
   padding: 8px 12px;
 }
+
+.clarify {
+  align-self: stretch;
+  background: #14181f;
+  border: 1px solid #2b3140;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.clarify-title {
+  font-weight: 600;
+}
+
+.clarify-ask {
+  font-size: 12px;
+  color: #8b95a8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clarify-q {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clarify-qtext {
+  font-weight: 500;
+}
+
+.clarify-tag {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: #7d879c;
+}
+
+.clarify-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clarify-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #262b38;
+  border-radius: 8px;
+  background: #161922;
+  cursor: pointer;
+}
+
+.clarify-opt.on {
+  border-color: #3b82f6;
+  background: #172033;
+}
+
+.clarify-opt input {
+  padding: 0;
+  margin: 0;
+  accent-color: #3b82f6;
+}
+
+.clarify-other {
+  font-size: 13px;
+}
+
+.clarify-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

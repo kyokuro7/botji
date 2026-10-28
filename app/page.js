@@ -2,21 +2,81 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BotSimulator from '../components/BotSimulator';
-import { buildPreview, extractBotJson, parseFiles } from '../lib/files';
-import { BOT_SYSTEM, WEBSITE_SYSTEM } from '../lib/prompts';
+import { buildPreview, extractBotJson, parseFiles, splitReply } from '../lib/files';
+import { WEBSITE_SYSTEM, getBotSystem, getClarifySystem } from '../lib/prompts';
 
 const DEFAULT_SETTINGS = {
   provider: 'openai',
   baseUrl: '',
   model: 'gpt-4o-mini',
-  apiKey: ''
+  apiKey: '',
+  askFirst: true
 };
 
 const FENCE = '```';
+const EXPORT_APP = 'xagent-ai-studio';
+const EXPORT_VERSION = 1;
+const BOT_LANGS = ['auto', 'javascript', 'python'];
+
+function isBotJson(f) {
+  return /(^|\/)bot\.json$/i.test(f.path);
+}
+
+function parseQuestions(raw) {
+  const src = String(raw || '');
+  const a = src.indexOf('{');
+  const b = src.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+
+  let data;
+  try {
+    data = JSON.parse(src.slice(a, b + 1));
+  } catch (e) {
+    return null;
+  }
+
+  const list = data && Array.isArray(data.questions) ? data.questions : [];
+  const out = list
+    .map((q) => {
+      const question = q && typeof q.question === 'string' ? q.question.trim() : '';
+      const options =
+        q && Array.isArray(q.options)
+          ? q.options.filter((o) => typeof o === 'string' && o.trim()).map((o) => o.trim()).slice(0, 6)
+          : [];
+      return { question, options, multiple: !!(q && q.multiple === true) };
+    })
+    .filter((q) => q.question && q.options.length >= 2)
+    .slice(0, 5);
+
+  return out.length > 0 ? out : null;
+}
+
+function cleanMessages(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+    .map((m) => {
+      const out = { role: m.role, content: m.content };
+      if (m.role === 'user' && typeof m.send === 'string') out.send = m.send;
+      return out;
+    });
+}
+
+function cleanFiles(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((f) => f && typeof f.path === 'string' && typeof f.content === 'string')
+    .map((f) => ({
+      path: f.path,
+      lang: typeof f.lang === 'string' ? f.lang : 'text',
+      content: f.content
+    }));
+}
 
 export default function Page() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [mode, setMode] = useState('website');
+  const [botLang, setBotLang] = useState('auto');
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState([]);
   const [files, setFiles] = useState([]);
@@ -24,11 +84,14 @@ export default function Page() {
   const [streamText, setStreamText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [asking, setAsking] = useState(false);
+  const [clarify, setClarify] = useState(null);
   const [tab, setTab] = useState('preview');
   const [activeFile, setActiveFile] = useState(0);
   const [showSettings, setShowSettings] = useState(true);
   const [rawOutput, setRawOutput] = useState('');
   const chatRef = useRef(null);
+  const importRef = useRef(null);
 
   useEffect(() => {
     try {
@@ -41,6 +104,7 @@ export default function Page() {
         setFiles(Array.isArray(c.files) ? c.files : []);
         setBot(c.bot || null);
         setMode(c.mode === 'telegram' ? 'telegram' : 'website');
+        setBotLang(BOT_LANGS.includes(c.botLang) ? c.botLang : 'auto');
       }
     } catch (e) {
       // localStorage rusak, abaikan
@@ -57,15 +121,15 @@ export default function Page() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('xagent.chat', JSON.stringify({ messages, files, bot, mode }));
+      localStorage.setItem('xagent.chat', JSON.stringify({ messages, files, bot, mode, botLang }));
     } catch (e) {
       // storage penuh / diblokir
     }
-  }, [messages, files, bot, mode]);
+  }, [messages, files, bot, mode, botLang]);
 
   useEffect(() => {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
-  }, [messages, streamText, busy]);
+  }, [messages, streamText, busy, asking, clarify]);
 
   const previewHtml = useMemo(() => buildPreview(files), [files]);
 
@@ -80,8 +144,18 @@ export default function Page() {
     setStreamText('');
     setRawOutput('');
     setError('');
+    setClarify(null);
+    setAsking(false);
     setActiveFile(0);
     setTab('preview');
+  }
+
+  function switchMode(next) {
+    if (clarify) {
+      setPrompt(clarify.text);
+      setClarify(null);
+    }
+    setMode(next);
   }
 
   function currentFilesDump() {
@@ -90,9 +164,50 @@ export default function Page() {
       .join('\n\n');
   }
 
-  async function generate() {
+  async function streamAI(system, history, onChunk) {
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: settings.provider,
+        baseUrl: settings.baseUrl,
+        model: settings.model,
+        apiKey: settings.apiKey,
+        system,
+        messages: history
+      })
+    });
+
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}));
+      throw new Error(payload.error || `Request gagal (${res.status})`);
+    }
+
+    if (!res.body) throw new Error('Respons tidak punya body.');
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let acc = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      acc += decoder.decode(value, { stream: true });
+      if (onChunk) onChunk(acc);
+    }
+
+    return acc;
+  }
+
+  function hasProject() {
+    if (mode === 'telegram') return files.some(isBotJson) || !!bot;
+    return files.some((f) => /\.html?$/i.test(f.path));
+  }
+
+  async function submit() {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text || busy || asking || clarify) return;
+
     if (!settings.apiKey.trim()) {
       setError('API key belum diisi.');
       setShowSettings(true);
@@ -104,14 +219,118 @@ export default function Page() {
       return;
     }
 
+    if (settings.askFirst && !hasProject()) {
+      await startClarify(text);
+    } else {
+      setPrompt('');
+      await runGenerate(text);
+    }
+  }
+
+  async function startClarify(text) {
+    setAsking(true);
+    setError('');
+
+    let questions = null;
+    try {
+      const raw = await streamAI(getClarifySystem(mode, botLang), [{ role: 'user', content: text }]);
+      questions = parseQuestions(raw);
+    } catch (e) {
+      setError(e.message || 'Gagal menyiapkan pertanyaan.');
+      setAsking(false);
+      return;
+    }
+
+    setAsking(false);
+
+    if (!questions) {
+      // AI tidak mengirim pertanyaan yang valid: langsung generate saja
+      setPrompt('');
+      await runGenerate(text);
+      return;
+    }
+
+    setPrompt('');
+    setClarify({
+      text,
+      questions,
+      answers: questions.map(() => ({ picked: [], other: '' }))
+    });
+  }
+
+  function togglePick(qi, oi) {
+    setClarify((prev) => {
+      if (!prev) return prev;
+      const multiple = prev.questions[qi].multiple;
+      const answers = prev.answers.map((a, i) => {
+        if (i !== qi) return a;
+        if (multiple) {
+          const picked = a.picked.includes(oi) ? a.picked.filter((x) => x !== oi) : [...a.picked, oi];
+          return { ...a, picked };
+        }
+        return { picked: [oi], other: '' };
+      });
+      return { ...prev, answers };
+    });
+  }
+
+  function setOther(qi, value) {
+    setClarify((prev) => {
+      if (!prev) return prev;
+      const multiple = prev.questions[qi].multiple;
+      const answers = prev.answers.map((a, i) => {
+        if (i !== qi) return a;
+        return multiple ? { ...a, other: value } : { picked: value.trim() ? [] : a.picked, other: value };
+      });
+      return { ...prev, answers };
+    });
+  }
+
+  const clarifyReady =
+    !!clarify && clarify.answers.every((a) => a.picked.length > 0 || a.other.trim().length > 0);
+
+  async function confirmClarify() {
+    if (!clarify || !clarifyReady || busy) return;
+
+    const lines = clarify.questions.map((q, i) => {
+      const a = clarify.answers[i];
+      const parts = a.picked.map((oi) => q.options[oi]);
+      if (a.other.trim()) parts.push(a.other.trim());
+      return `- ${q.question} ${parts.join(', ')}`;
+    });
+
+    const full = `${clarify.text}\n\nPilihan saya:\n${lines.join('\n')}`;
+    setClarify(null);
+    await runGenerate(full);
+  }
+
+  function skipClarify() {
+    if (!clarify || busy) return;
+    const text = clarify.text;
+    setClarify(null);
+    runGenerate(text);
+  }
+
+  function cancelClarify() {
+    if (!clarify) return;
+    setPrompt(clarify.text);
+    setClarify(null);
+  }
+
+  async function runGenerate(text) {
     let send = text;
 
-    if (mode === 'website' && files.length > 0) {
+    const hasWebsite = files.some((f) => /\.html?$/i.test(f.path));
+    const hasBotProject = files.some(isBotJson);
+
+    if (mode === 'website' && hasWebsite) {
       send = `Kode saat ini:\n\n${currentFilesDump()}\n\nPermintaan baru: ${text}\n\nKirim ulang SEMUA file secara lengkap.`;
     }
 
-    if (mode === 'telegram' && bot) {
-      send = `bot.json saat ini:\n${FENCE}json\n${JSON.stringify(bot, null, 2)}\n${FENCE}\n\nPermintaan baru: ${text}`;
+    if (mode === 'telegram' && hasBotProject) {
+      send = `Kode saat ini:\n\n${currentFilesDump()}\n\nPermintaan baru: ${text}\n\nKirim ulang SEMUA file secara lengkap (kode bot, dependensi, .env.example, dan bot.json).`;
+    } else if (mode === 'telegram' && bot) {
+      send = `bot.json saat ini:\n${FENCE}json\n${JSON.stringify(bot, null, 2)}\n${FENCE}\n\nPermintaan baru: ${text}\n\nBuat kode bot asli lengkap beserta bot.json.`;
     }
 
     const history = [...messages, { role: 'user', content: text, send }];
@@ -123,60 +342,56 @@ export default function Page() {
     setStreamText('');
     setTab('preview');
 
-    const system = mode === 'telegram' ? BOT_SYSTEM : WEBSITE_SYSTEM;
+    const system = mode === 'telegram' ? getBotSystem(botLang) : WEBSITE_SYSTEM;
 
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          provider: settings.provider,
-          baseUrl: settings.baseUrl,
-          model: settings.model,
-          apiKey: settings.apiKey,
-          system,
-          messages: history.map((m) => ({
-            role: m.role,
-            content: m.send || m.content
-          }))
-        })
-      });
-
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(payload.error || `Request gagal (${res.status})`);
-      }
-
-      if (!res.body) throw new Error('Respons tidak punya body.');
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let acc = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        acc += decoder.decode(value, { stream: true });
-        setStreamText(acc);
-      }
+      const acc = await streamAI(
+        system,
+        history.map((m) => ({ role: m.role, content: m.send || m.content })),
+        setStreamText
+      );
 
       setRawOutput(acc);
       const parsed = parseFiles(acc);
+      const { reply } = splitReply(acc);
 
       if (parsed.length === 0) {
+        if (reply) {
+          // AI hanya menjawab dengan teks (misal bertanya balik): tampilkan sebagai chat
+          setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+          return;
+        }
         throw new Error('AI tidak mengembalikan file dengan format yang dikenali. Lihat tab Kode.');
       }
 
       if (mode === 'telegram') {
-        const result = extractBotJson(parsed);
-        if (result.error) throw new Error(result.error);
-        setBot(result.bot);
-        setFiles(parsed);
+        // kode utama di depan, bot.json (preview) di belakang
+        const ordered = [...parsed.filter((f) => !isBotJson(f)), ...parsed.filter(isBotJson)];
+        const result = extractBotJson(ordered);
+        const list = ordered.map((f) => f.path).join(', ');
+
+        setFiles(ordered);
         setActiveFile(0);
-        setMessages((prev) => [
-          ...prev,
-          { role: 'assistant', content: `bot.json diperbarui. ${Object.keys(result.bot.screens).length} menu siap diuji.` }
-        ]);
+
+        if (result.error) {
+          setError(`Kode bot terbuat, tapi preview gagal: ${result.error}`);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: `${reply ? `${reply}\n\n` : ''}${ordered.length} file masuk ke tab Kode: ${list}.\nPreview bot belum bisa dibuat: ${result.error}`
+            }
+          ]);
+        } else {
+          setBot(result.bot);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: `${reply ? `${reply}\n\n` : ''}${ordered.length} file masuk ke tab Kode: ${list}.\nPreview: ${Object.keys(result.bot.screens).length} menu siap diuji.`
+            }
+          ]);
+        }
       } else {
         if (!parsed.some((f) => /\.html?$/i.test(f.path))) {
           throw new Error('Tidak ada index.html di hasil AI. Preview tidak bisa dibuat.');
@@ -185,7 +400,10 @@ export default function Page() {
         setActiveFile(0);
         setMessages((prev) => [
           ...prev,
-          { role: 'assistant', content: `Selesai. ${parsed.length} file: ${parsed.map((f) => f.path).join(', ')}` }
+          {
+            role: 'assistant',
+            content: `${reply ? `${reply}\n\n` : ''}${parsed.length} file masuk ke tab Kode: ${parsed.map((f) => f.path).join(', ')}.`
+          }
         ]);
       }
     } catch (e) {
@@ -206,50 +424,67 @@ export default function Page() {
     URL.revokeObjectURL(url);
   }
 
-  function downloadChat() {
+  function exportChat() {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const lines = [
-      '# Percakapan XAGENT AI Studio',
-      '',
-      `Mode: ${mode}`,
-      `Provider: ${settings.provider}`,
-      `Model: ${settings.model}`,
-      `Waktu: ${new Date().toISOString()}`,
-      '',
-      '## Riwayat Chat',
-      ''
-    ];
+    const data = {
+      app: EXPORT_APP,
+      version: EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      mode,
+      botLang,
+      provider: settings.provider,
+      model: settings.model,
+      messages,
+      files,
+      bot
+    };
+    download(
+      new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }),
+      `chat-xagent-${stamp}.json`
+    );
+  }
 
-    for (const m of messages) {
-      lines.push(`### ${m.role === 'user' ? 'User' : 'AI'}`);
-      lines.push('');
-      lines.push(m.content);
-      lines.push('');
-    }
+  async function importChat(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || busy || asking) return;
 
-    if (files.length > 0) {
-      lines.push('## File Hasil Generasi');
-      lines.push('');
-      for (const f of files) {
-        lines.push(`### ${f.path}`);
-        lines.push('');
-        lines.push(`${FENCE}${f.lang}`);
-        lines.push(f.content);
-        lines.push(FENCE);
-        lines.push('');
+    try {
+      const data = JSON.parse(await file.text());
+      const msgs = cleanMessages(data && data.messages);
+      if (!data || data.app !== EXPORT_APP || msgs.length === 0) {
+        throw new Error('File bukan hasil export chat XAGENT.');
       }
-    }
 
-    if (bot) {
-      lines.push('## bot.json');
-      lines.push('');
-      lines.push(`${FENCE}json`);
-      lines.push(JSON.stringify(bot, null, 2));
-      lines.push(FENCE);
-      lines.push('');
-    }
+      if (messages.length > 0 && !window.confirm('Chat saat ini akan diganti dengan chat dari file. Lanjut?')) {
+        return;
+      }
 
-    download(new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' }), `chat-${stamp}.md`);
+      const importedMode = data.mode === 'telegram' ? 'telegram' : 'website';
+      const importedFiles = cleanFiles(data.files);
+      let importedBot = null;
+
+      if (importedMode === 'telegram') {
+        importedBot = extractBotJson(importedFiles).bot;
+        if (!importedBot && data.bot && typeof data.bot === 'object' && data.bot.screens) {
+          importedBot = data.bot;
+        }
+      }
+
+      setMode(importedMode);
+      setBotLang(BOT_LANGS.includes(data.botLang) ? data.botLang : 'auto');
+      setMessages(msgs);
+      setFiles(importedFiles);
+      setBot(importedBot);
+      setStreamText('');
+      setRawOutput('');
+      setError('');
+      setClarify(null);
+      setActiveFile(0);
+      setTab('preview');
+    } catch (err) {
+      setError(`Import gagal: ${err.message || 'file tidak bisa dibaca.'}`);
+    }
   }
 
   function downloadFile(file) {
@@ -269,27 +504,50 @@ export default function Page() {
           <button
             type="button"
             className={mode === 'website' ? 'active' : ''}
-            onClick={() => setMode('website')}
+            onClick={() => switchMode('website')}
           >
             Website
           </button>
           <button
             type="button"
             className={mode === 'telegram' ? 'active' : ''}
-            onClick={() => setMode('telegram')}
+            onClick={() => switchMode('telegram')}
           >
             Bot Telegram
           </button>
         </div>
+
+        {mode === 'telegram' && (
+          <select
+            value={botLang}
+            onChange={(e) => setBotLang(e.target.value)}
+            title="Bahasa kode bot"
+            style={{ width: 'auto' }}
+          >
+            <option value="auto">Bahasa: ikuti permintaan</option>
+            <option value="javascript">JavaScript (index.js)</option>
+            <option value="python">Python (bot.py)</option>
+          </select>
+        )}
 
         <div className="spacer" />
 
         <button type="button" className="btn ghost" onClick={() => setShowSettings((v) => !v)}>
           {showSettings ? 'Tutup setelan' : 'Setelan'}
         </button>
-        <button type="button" className="btn ghost" onClick={downloadChat} disabled={messages.length === 0}>
-          Download chat
+        <button type="button" className="btn ghost" onClick={exportChat} disabled={messages.length === 0}>
+          Export chat
         </button>
+        <button type="button" className="btn ghost" onClick={() => importRef.current && importRef.current.click()} disabled={busy}>
+          Import chat
+        </button>
+        <input
+          ref={importRef}
+          type="file"
+          accept=".json,application/json"
+          onChange={importChat}
+          style={{ display: 'none' }}
+        />
         <button type="button" className="btn ghost" onClick={newChat}>
           Chat baru
         </button>
@@ -356,7 +614,7 @@ export default function Page() {
               <div className="empty">
                 {mode === 'website'
                   ? 'Contoh: buat landing page portofolio dark mode, ada hero, skill, kontak.'
-                  : 'Contoh: bot toko online, menu katalog, cek ongkir, jam buka, kontak admin.'}
+                  : 'Contoh: bot toko online pakai index.js, menu katalog, cek ongkir, jam buka, kontak admin.'}
               </div>
             )}
 
@@ -366,7 +624,70 @@ export default function Page() {
               </div>
             ))}
 
-            {busy && <div className="msg stream">{streamText || 'menulis...'}</div>}
+            {busy && (() => {
+              const live = splitReply(streamText);
+              return (
+                <>
+                  {live.reply && <div className="msg bot">{live.reply}</div>}
+                  <div className="msg stream">
+                    {live.writing ? `menulis ${live.writing}...` : live.reply ? 'menyiapkan file...' : 'berpikir...'}
+                  </div>
+                </>
+              );
+            })()}
+
+            {asking && <div className="msg stream">menyiapkan pertanyaan...</div>}
+
+            {clarify && (
+              <div className="clarify">
+                <div className="clarify-title">Beberapa pertanyaan dulu sebelum mulai</div>
+                <div className="clarify-ask">{clarify.text}</div>
+
+                {clarify.questions.map((q, qi) => (
+                  <div key={qi} className="clarify-q">
+                    <div className="clarify-qtext">
+                      {qi + 1}. {q.question}
+                      {q.multiple && <span className="clarify-tag">boleh lebih dari satu</span>}
+                    </div>
+                    <div className="clarify-opts">
+                      {q.options.map((opt, oi) => {
+                        const on = clarify.answers[qi].picked.includes(oi);
+                        return (
+                          <label key={oi} className={`clarify-opt ${on ? 'on' : ''}`}>
+                            <input
+                              type={q.multiple ? 'checkbox' : 'radio'}
+                              name={`clarify-${qi}`}
+                              checked={on}
+                              onChange={() => togglePick(qi, oi)}
+                            />
+                            <span>{opt}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <input
+                      className="clarify-other"
+                      value={clarify.answers[qi].other}
+                      onChange={(e) => setOther(qi, e.target.value)}
+                      placeholder="Lainnya (ketik sendiri)"
+                    />
+                  </div>
+                ))}
+
+                <div className="clarify-actions">
+                  <button type="button" className="btn ghost" onClick={cancelClarify}>
+                    Batal
+                  </button>
+                  <button type="button" className="btn ghost" onClick={skipClarify}>
+                    Lewati
+                  </button>
+                  <div className="spacer" />
+                  <button type="button" className="btn" onClick={confirmClarify} disabled={!clarifyReady || busy}>
+                    Kirim
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {error && <div className="err">{error}</div>}
@@ -376,15 +697,28 @@ export default function Page() {
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={mode === 'website' ? 'Mau bikin website apa?' : 'Mau bikin bot apa?'}
+              disabled={!!clarify || asking}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) generate();
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) submit();
               }}
             />
             <div className="composer-row">
-              <span style={{ fontSize: 12, color: '#7d879c' }}>Ctrl+Enter kirim</span>
+              <label style={{ fontSize: 12, color: '#7d879c', display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={!!settings.askFirst}
+                  onChange={(e) => update('askFirst', e.target.checked)}
+                />
+                Tanya dulu
+              </label>
               <div className="spacer" />
-              <button type="button" className="btn" onClick={generate} disabled={busy || !prompt.trim()}>
-                {busy ? 'Memproses...' : 'Generate'}
+              <button
+                type="button"
+                className="btn"
+                onClick={submit}
+                disabled={busy || asking || !!clarify || !prompt.trim()}
+              >
+                {asking ? 'Menyiapkan...' : busy ? 'Memproses...' : 'Generate'}
               </button>
             </div>
           </div>

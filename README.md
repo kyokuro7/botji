@@ -4,11 +4,14 @@ Generate kode pakai AI, langsung preview di web.
 
 ## Fitur
 - Dua mode: Website dan Bot Telegram
+- Mode Bot Telegram menghasilkan kode bot asli (index.js / bot.py + dependensi + .env.example) plus bot.json untuk preview simulasi
+- Sesi tanya sebelum generate: AI menyiapkan pertanyaan pilihan ganda, user memilih jawaban lalu menekan Kirim (bisa dimatikan lewat centang "Tanya dulu")
+- Export chat (.json) dan Import chat untuk melanjutkan percakapan sebelumnya
 - Output multi-file (index.html + style.css + script.js)
 - Preview website lewat iframe sandbox
 - Preview bot Telegram sebagai simulasi chat dari bot.json
 - API key disimpan di localStorage browser, diteruskan lewat serverless proxy
-- Simpan riwayat chat di localStorage, download jadi satu file .md
+- Riwayat chat tersimpan otomatis di localStorage
 
 ## Deploy ke Vercel
 1. Push folder ini ke repo GitHub.
