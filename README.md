@@ -5,6 +5,8 @@ Generate kode pakai AI, langsung preview di web.
 ## Fitur
 - Dua halaman: Studio (chat, preview, kode) dan Setelan (provider, model, API key, tes koneksi)
 - Tampilan mobile: Chat, Preview, dan Kode tampil satu per satu layar penuh lewat navigasi bawah
+- Skill: paket instruksi yang bisa dinyalakan (SEO, aksesibilitas, animasi, panel admin bot, dll) dan skill buatan sendiri, tersimpan di localStorage
+- Desain web: pilih gaya, palet warna, font, sudut, kepadatan; dikirim ke AI sebagai brief desain. Preview punya tombol Desktop/Tablet/HP
 - Dua mode: Website dan Bot Telegram
 - Mode Bot Telegram menghasilkan kode bot asli (index.js / bot.py + dependensi + .env.example) plus bot.json untuk preview simulasi
 - Sesi tanya sebelum generate: AI menyiapkan pertanyaan pilihan ganda, user memilih jawaban lalu menekan Kirim (bisa dimatikan lewat centang "Tanya dulu")

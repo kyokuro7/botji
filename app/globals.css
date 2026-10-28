@@ -719,3 +719,73 @@ a.btn {
     padding: 12px;
   }
 }
+
+/* ===== skill & desain ===== */
+.btn.sm { padding: 5px 10px; font-size: 12px; }
+
+.modal-back {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.modal {
+  width: 100%; max-width: 560px; max-height: 88vh;
+  display: flex; flex-direction: column;
+  background: #12151c; border: 1px solid #262b38; border-radius: 14px;
+}
+.modal-head {
+  display: flex; gap: 12px; align-items: flex-start; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid #1d212b;
+}
+.modal-title { font-weight: 700; font-size: 16px; }
+.modal-sub { font-size: 12px; color: #7d879c; margin-top: 2px; }
+.modal-body { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+
+.skill-list { display: flex; flex-direction: column; gap: 8px; }
+.skill {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border: 1px solid #262b38; border-radius: 10px; padding: 10px 12px; background: #161922;
+}
+.skill.on { border-color: #1f6feb; background: #14203a; }
+.skill-main { display: flex; gap: 10px; align-items: flex-start; flex: 1; cursor: pointer; }
+.skill-main input { margin-top: 3px; }
+.skill-main b { display: block; font-size: 13px; }
+.skill-main small { display: block; color: #8b95aa; font-size: 12px; margin-top: 2px; }
+.tag { font-style: normal; font-size: 10px; margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: #2b3140; color: #c8cfdd; font-weight: 400; }
+.skill-tools { display: flex; gap: 6px; }
+.skill-form { display: flex; flex-direction: column; gap: 12px; }
+
+.design-switch { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+.dim { opacity: 0.45; pointer-events: none; display: flex; flex-direction: column; gap: 14px; }
+.modal-body > div:not(.dim):not(.clarify-actions) { display: flex; flex-direction: column; gap: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { background: #161922; border: 1px solid #262b38; color: #c8cfdd; border-radius: 999px; padding: 6px 12px; font-size: 13px; }
+.chip.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+.palettes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.palette { display: flex; align-items: center; gap: 4px; background: #161922; border: 1px solid #262b38; border-radius: 10px; padding: 6px; color: #c8cfdd; }
+.palette.on { border-color: #1f6feb; }
+.palette span { width: 16px; height: 16px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.15); flex: none; }
+.palette i { font-style: normal; font-size: 12px; margin-left: 4px; }
+.colors { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 8px; }
+.color-in { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #c8cfdd; }
+.color-in input { width: 36px; height: 28px; padding: 0; border-radius: 6px; }
+
+.design-demo { padding: 14px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; border: 1px solid #262b38; }
+.design-demo button { border: 0; padding: 7px 14px; }
+
+.devices { display: inline-flex; border: 1px solid #262b38; border-radius: 8px; overflow: hidden; margin-right: 8px; }
+.devices button { background: transparent; border: 0; color: #9aa3b5; padding: 5px 10px; font-size: 12px; }
+.devices button.active { background: #2b3140; color: #fff; }
+
+.preview-wrap iframe.frame-tablet { width: 768px; max-width: 100%; margin: 0 auto; border-left: 1px solid #ccd; border-right: 1px solid #ccd; }
+.preview-wrap iframe.frame-mobile { width: 390px; max-width: 100%; margin: 0 auto; border-left: 1px solid #ccd; border-right: 1px solid #ccd; }
+.preview-wrap:has(iframe.frame-tablet), .preview-wrap:has(iframe.frame-mobile) { background: #1d212b; }
+
+@media (max-width: 900px) {
+  .modal-back { align-items: flex-end; padding: 0; }
+  .modal { max-width: none; max-height: 92vh; border-radius: 14px 14px 0 0; }
+  .devices { display: none; }
+  .palettes { grid-template-columns: repeat(2, 1fr); }
+}

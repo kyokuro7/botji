@@ -3,8 +3,12 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BotSimulator from '../components/BotSimulator';
+import DesignModal from '../components/DesignModal';
+import SkillsModal from '../components/SkillsModal';
 import { buildPreview, extractBotJson, parseFiles, splitReply } from '../lib/files';
-import { WEBSITE_SYSTEM, getBotSystem, getClarifySystem } from '../lib/prompts';
+import { buildDesignBlock, loadDesign, saveDesign, DEFAULT_DESIGN } from '../lib/design';
+import { getBotSystem, getClarifySystem, getWebsiteSystem } from '../lib/prompts';
+import { buildSkillBlock, loadSkillState, saveSkillState, skillsForMode } from '../lib/skills';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../lib/settings';
 
 const FENCE = '```';
@@ -86,11 +90,17 @@ export default function Page() {
   const [mobileView, setMobileView] = useState('chat');
   const [menuOpen, setMenuOpen] = useState(false);
   const [rawOutput, setRawOutput] = useState('');
+  const [skillState, setSkillState] = useState({ active: [], custom: [] });
+  const [design, setDesign] = useState(DEFAULT_DESIGN);
+  const [modal, setModal] = useState('');
+  const [device, setDevice] = useState('desktop');
   const chatRef = useRef(null);
   const importRef = useRef(null);
 
   useEffect(() => {
     setSettings(loadSettings());
+    setSkillState(loadSkillState());
+    setDesign(loadDesign());
     try {
       const savedChat = localStorage.getItem('xagent.chat');
       if (savedChat) {
@@ -121,6 +131,18 @@ export default function Page() {
   }, [messages, streamText, busy, asking, clarify]);
 
   const previewHtml = useMemo(() => buildPreview(files), [files]);
+
+  function changeSkills(next) {
+    setSkillState(next);
+    saveSkillState(next);
+  }
+
+  function changeDesign(next) {
+    setDesign(next);
+    saveDesign(next);
+  }
+
+  const activeSkillCount = skillsForMode(mode, skillState.custom).filter((s) => skillState.active.includes(s.id)).length;
 
   function update(field, value) {
     const next = { ...settings, [field]: value };
@@ -332,7 +354,11 @@ export default function Page() {
     setStreamText('');
     setTab('preview');
 
-    const system = mode === 'telegram' ? getBotSystem(botLang) : WEBSITE_SYSTEM;
+    const skillBlock = buildSkillBlock(mode, skillState);
+    const system =
+      mode === 'telegram'
+        ? getBotSystem(botLang, skillBlock)
+        : getWebsiteSystem(`${skillBlock}${buildDesignBlock(design)}`);
 
     try {
       const acc = await streamAI(
@@ -663,6 +689,14 @@ export default function Page() {
                   <option value="python">Python</option>
                 </select>
               )}
+              <button type="button" className="btn ghost sm" onClick={() => setModal('skills')}>
+                Skill{activeSkillCount > 0 ? ` (${activeSkillCount})` : ''}
+              </button>
+              {mode === 'website' && (
+                <button type="button" className="btn ghost sm" onClick={() => setModal('design')}>
+                  Desain{design.enabled ? ' ✓' : ''}
+                </button>
+              )}
               <label style={{ fontSize: 12, color: '#7d879c', display: 'flex', gap: 6, alignItems: 'center' }}>
                 <input
                   type="checkbox"
@@ -703,6 +737,19 @@ export default function Page() {
               </button>
             </div>
             <div className="spacer" />
+            {tab === 'preview' && mode === 'website' && previewHtml && (
+              <div className="devices">
+                {[
+                  ['desktop', 'Desktop'],
+                  ['tablet', 'Tablet'],
+                  ['mobile', 'HP']
+                ].map(([id, label]) => (
+                  <button key={id} type="button" className={device === id ? 'active' : ''} onClick={() => setDevice(id)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
             {active && (
               <button type="button" className="btn ghost" onClick={() => downloadFile(active)}>
                 Unduh file
@@ -721,6 +768,7 @@ export default function Page() {
               ) : previewHtml ? (
                 <iframe
                   title="preview"
+                  className={`frame-${device}`}
                   srcDoc={previewHtml}
                   sandbox="allow-scripts allow-forms allow-modals allow-popups"
                 />
@@ -763,6 +811,11 @@ export default function Page() {
           )}
         </div>
       </div>
+
+      {modal === 'skills' && (
+        <SkillsModal mode={mode} state={skillState} onChange={changeSkills} onClose={() => setModal('')} />
+      )}
+      {modal === 'design' && <DesignModal design={design} onChange={changeDesign} onClose={() => setModal('')} />}
 
       <nav className="mobile-nav">
         <button
