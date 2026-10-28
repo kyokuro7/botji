@@ -5,11 +5,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import BotSimulator from '../components/BotSimulator';
 import DesignModal from '../components/DesignModal';
 import SkillsModal from '../components/SkillsModal';
-import { buildPreview, extractBotJson, parseFiles, splitReply } from '../lib/files';
+import { buildPreview, diffLines, extractBotJson, parseFiles, splitReply } from '../lib/files';
 import { buildDesignBlock, loadDesign, saveDesign, DEFAULT_DESIGN } from '../lib/design';
 import { getBotSystem, getClarifySystem, getWebsiteSystem } from '../lib/prompts';
 import { buildSkillBlock, loadSkillState, saveSkillState, skillsForMode } from '../lib/skills';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../lib/settings';
+import { createZip } from '../lib/zip';
 
 const FENCE = '```';
 const EXPORT_APP = 'xagent-ai-studio';
@@ -18,6 +19,10 @@ const BOT_LANGS = ['auto', 'javascript', 'python'];
 
 function isBotJson(f) {
   return /(^|\/)bot\.json$/i.test(f.path);
+}
+
+function timestamp() {
+  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 }
 
 function parseQuestions(raw) {
@@ -71,6 +76,31 @@ function cleanFiles(list) {
     }));
 }
 
+// Bandingkan file lama vs file baru hasil AI.
+function computeDiffs(prevFiles, nextFiles) {
+  const map = {};
+  const prev = new Map((Array.isArray(prevFiles) ? prevFiles : []).map((f) => [f.path, f.content]));
+
+  for (const f of Array.isArray(nextFiles) ? nextFiles : []) {
+    const had = prev.has(f.path);
+    const oldText = had ? prev.get(f.path) : '';
+    const lines = diffLines(oldText, f.content);
+    let added = 0;
+    let removed = 0;
+    for (const l of lines) {
+      if (l.type === 'add') added += 1;
+      else if (l.type === 'del') removed += 1;
+    }
+    map[f.path] = { lines, added, removed, same: added === 0 && removed === 0, isNew: !had };
+  }
+
+  return map;
+}
+
+function hasChanges(diffs) {
+  return Object.keys(diffs).some((k) => diffs[k] && !diffs[k].same);
+}
+
 export default function Page() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [mode, setMode] = useState('website');
@@ -94,6 +124,8 @@ export default function Page() {
   const [design, setDesign] = useState(DEFAULT_DESIGN);
   const [modal, setModal] = useState('');
   const [device, setDevice] = useState('desktop');
+  const [diffs, setDiffs] = useState({});
+  const [codeView, setCodeView] = useState('source');
   const chatRef = useRef(null);
   const importRef = useRef(null);
 
@@ -150,6 +182,11 @@ export default function Page() {
     saveSettings(next);
   }
 
+  function clearDiffs() {
+    setDiffs({});
+    setCodeView('source');
+  }
+
   function newChat() {
     setMessages([]);
     setFiles([]);
@@ -162,6 +199,7 @@ export default function Page() {
     setActiveFile(0);
     setTab('preview');
     setMobileView('chat');
+    clearDiffs();
   }
 
   function switchMode(next) {
@@ -170,6 +208,7 @@ export default function Page() {
       setClarify(null);
     }
     setMode(next);
+    clearDiffs();
   }
 
   function currentFilesDump() {
@@ -385,9 +424,12 @@ export default function Page() {
         const ordered = [...parsed.filter((f) => !isBotJson(f)), ...parsed.filter(isBotJson)];
         const result = extractBotJson(ordered);
         const list = ordered.map((f) => f.path).join(', ');
+        const nextDiffs = computeDiffs(files, ordered);
 
+        setDiffs(nextDiffs);
         setFiles(ordered);
         setActiveFile(0);
+        setCodeView(hasChanges(nextDiffs) ? 'diff' : 'source');
 
         if (result.error) {
           setError(`Kode bot terbuat, tapi preview gagal: ${result.error}`);
@@ -412,8 +454,13 @@ export default function Page() {
         if (!parsed.some((f) => /\.html?$/i.test(f.path))) {
           throw new Error('Tidak ada index.html di hasil AI. Preview tidak bisa dibuat.');
         }
+        const nextDiffs = computeDiffs(files, parsed);
+
+        setDiffs(nextDiffs);
         setFiles(parsed);
         setActiveFile(0);
+        setCodeView(hasChanges(nextDiffs) ? 'diff' : 'source');
+
         setMessages((prev) => [
           ...prev,
           {
@@ -441,7 +488,6 @@ export default function Page() {
   }
 
   function exportChat() {
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const data = {
       app: EXPORT_APP,
       version: EXPORT_VERSION,
@@ -456,7 +502,7 @@ export default function Page() {
     };
     download(
       new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }),
-      `chat-xagent-${stamp}.json`
+      `chat-xagent-${timestamp()}.json`
     );
   }
 
@@ -498,6 +544,7 @@ export default function Page() {
       setClarify(null);
       setActiveFile(0);
       setTab('preview');
+      clearDiffs();
     } catch (err) {
       setError(`Import gagal: ${err.message || 'file tidak bisa dibaca.'}`);
     }
@@ -507,7 +554,35 @@ export default function Page() {
     download(new Blob([file.content], { type: 'text/plain;charset=utf-8' }), file.path);
   }
 
+  function downloadZip() {
+    if (files.length === 0) return;
+    try {
+      const blob = createZip(files.map((f) => ({ path: f.path, content: f.content })));
+      download(blob, `xagent-project-${timestamp()}.zip`);
+    } catch (e) {
+      setError(`Gagal membuat ZIP: ${e.message || 'tidak diketahui'}`);
+    }
+  }
+
+  function changeActiveContent(value) {
+    const file = files[activeFile];
+    if (!file) return;
+    const path = file.path;
+
+    setFiles((prev) => prev.map((f, i) => (i === activeFile ? { ...f, content: value } : f)));
+
+    // kode sudah diubah manual: diff AI tidak relevan lagi
+    setDiffs((prev) => {
+      if (!prev[path]) return prev;
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
+  }
+
   const active = files[activeFile] || null;
+  const activeDiff = active ? diffs[active.path] || null : null;
+  const locked = busy || asking;
 
   return (
     <div className="app">
@@ -750,6 +825,11 @@ export default function Page() {
                 ))}
               </div>
             )}
+            {files.length > 0 && (
+              <button type="button" className="btn ghost" onClick={downloadZip}>
+                Unduh ZIP{files.length > 1 ? ` (${files.length})` : ''}
+              </button>
+            )}
             {active && (
               <button type="button" className="btn ghost" onClick={() => downloadFile(active)}>
                 Unduh file
@@ -782,21 +862,81 @@ export default function Page() {
             <div className="code-wrap">
               {files.length > 0 && (
                 <div className="filebar">
-                  {files.map((f, i) => (
-                    <button
-                      key={f.path}
-                      type="button"
-                      className={i === activeFile ? 'active' : ''}
-                      onClick={() => setActiveFile(i)}
-                    >
-                      {f.path}
-                    </button>
-                  ))}
+                  {files.map((f, i) => {
+                    const d = diffs[f.path];
+                    return (
+                      <button
+                        key={f.path}
+                        type="button"
+                        className={i === activeFile ? 'active' : ''}
+                        onClick={() => setActiveFile(i)}
+                      >
+                        {f.path}
+                        {d && !d.same && (
+                          <span className="filediff">
+                            {' '}
+                            +{d.added} -{d.removed}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 
               {active ? (
-                <pre className="code">{active.content}</pre>
+                <>
+                  <div className="codebar">
+                    <div className="codetabs">
+                      <button
+                        type="button"
+                        className={codeView === 'source' ? 'active' : ''}
+                        onClick={() => setCodeView('source')}
+                      >
+                        Kode
+                      </button>
+                      <button
+                        type="button"
+                        className={codeView === 'diff' ? 'active' : ''}
+                        onClick={() => setCodeView('diff')}
+                        disabled={!activeDiff || activeDiff.same}
+                      >
+                        Diff{activeDiff && !activeDiff.same ? ` (+${activeDiff.added} -${activeDiff.removed})` : ''}
+                      </button>
+                    </div>
+                    <div className="spacer" />
+                    <span className="edit-note">
+                      {locked ? 'AI sedang menulis, edit dikunci' : 'Bisa diedit langsung, preview ikut berubah'}
+                    </span>
+                  </div>
+
+                  {codeView === 'diff' && activeDiff ? (
+                    <div className="diff">
+                      {activeDiff.isNew && <div className="diff-gap">File baru dari AI</div>}
+                      {activeDiff.lines.map((l, i) =>
+                        l.type === 'gap' ? (
+                          <div key={i} className="diff-gap">
+                            … {l.count} baris sama
+                          </div>
+                        ) : (
+                          <div key={i} className={`diff-line ${l.type}`}>
+                            <span className="diff-sign">{l.type === 'add' ? '+' : l.type === 'del' ? '-' : ' '}</span>
+                            <span>{l.text || ' '}</span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  ) : (
+                    <textarea
+                      className="code-edit"
+                      value={active.content}
+                      onChange={(e) => changeActiveContent(e.target.value)}
+                      disabled={locked}
+                      spellCheck={false}
+                      wrap="off"
+                    />
+                  )}
+                </>
               ) : rawOutput ? (
                 <>
                   <div className="filebar">
