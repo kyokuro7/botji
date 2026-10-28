@@ -1,0 +1,128 @@
+.codebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #1d212b;
+  background: #0d1016;
+}
+
+.codetabs {
+  display: flex;
+  gap: 4px;
+}
+
+.codetabs button {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #7d879c;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.codetabs button.active {
+  color: #fff;
+  border-bottom-color: #1f6feb;
+}
+
+.codetabs button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.edit-note {
+  font-size: 11.5px;
+  color: #7d879c;
+  white-space: nowrap;
+}
+
+.filediff {
+  margin-left: 6px;
+  font-size: 10px;
+  color: #6ee7a0;
+}
+
+.code-edit {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 14px;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  background: #0b0e13;
+  color: #cfd6e4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+
+.code-edit:focus {
+  border-color: transparent;
+  outline: none;
+}
+
+.code-edit:disabled {
+  color: #8b95a8;
+  cursor: not-allowed;
+}
+
+.diff {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 0;
+  background: #0b0e13;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line.add {
+  background: #0e2a1a;
+  color: #8ef0b0;
+}
+
+.diff-line.del {
+  background: #2a1414;
+  color: #f8a1a1;
+}
+
+.diff-line.same {
+  color: #8b95a8;
+}
+
+.diff-sign {
+  flex: none;
+  width: 10px;
+  opacity: 0.85;
+  user-select: none;
+}
+
+.diff-gap {
+  padding: 2px 12px;
+  background: #0d1016;
+  color: #5f6a7d;
+  font-size: 11.5px;
+}
+
+@media (max-width: 900px) {
+  .edit-note {
+    white-space: normal;
+    text-align: right;
+  }
+}
