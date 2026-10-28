@@ -16,6 +16,7 @@ const FENCE = '```';
 const EXPORT_APP = 'xagent-ai-studio';
 const EXPORT_VERSION = 1;
 const BOT_LANGS = ['auto', 'javascript', 'python'];
+const MAX_QUESTIONS = 12;
 
 function isBotJson(f) {
   return /(^|\/)bot\.json$/i.test(f.path);
@@ -49,7 +50,7 @@ function parseQuestions(raw) {
       return { question, options, multiple: !!(q && q.multiple === true) };
     })
     .filter((q) => q.question && q.options.length >= 2)
-    .slice(0, 5);
+    .slice(0, MAX_QUESTIONS);
 
   return out.length > 0 ? out : null;
 }
@@ -282,9 +283,13 @@ export default function Page() {
     setAsking(true);
     setError('');
 
+    const briefOn = mode === 'website' && skillState.active.includes('brief');
+
     let questions = null;
     try {
-      const raw = await streamAI(getClarifySystem(mode, botLang), [{ role: 'user', content: text }]);
+      const raw = await streamAI(getClarifySystem(mode, botLang, { brief: briefOn }), [
+        { role: 'user', content: text }
+      ]);
       questions = parseQuestions(raw);
     } catch (e) {
       setError(e.message || 'Gagal menyiapkan pertanyaan.');
