@@ -1,4 +1,5 @@
 import './globals.css';
+import './code.css';
 
 export const metadata = {
   title: 'XAGENT AI Studio',
