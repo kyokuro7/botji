@@ -9,7 +9,7 @@ import { buildPreview, diffLines, extractBotJson, parseFiles, splitReply } from 
 import { buildDesignBlock, loadDesign, saveDesign, DEFAULT_DESIGN } from '../lib/design';
 import { getBotSystem, getClarifySystem, getWebsiteSystem } from '../lib/prompts';
 import { buildSkillBlock, loadSkillState, saveSkillState, skillsForMode } from '../lib/skills';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../lib/settings';
+import { DEFAULT_SETTINGS, listModels, loadSettings, saveSettings } from '../lib/settings';
 import { createZip } from '../lib/zip';
 
 const FENCE = '```';
@@ -17,6 +17,7 @@ const EXPORT_APP = 'xagent-ai-studio';
 const EXPORT_VERSION = 1;
 const BOT_LANGS = ['auto', 'javascript', 'python'];
 const MAX_QUESTIONS = 12;
+const MODEL_DEBOUNCE = 700;
 
 function isBotJson(f) {
   return /(^|\/)bot\.json$/i.test(f.path);
@@ -127,6 +128,9 @@ export default function Page() {
   const [device, setDevice] = useState('desktop');
   const [diffs, setDiffs] = useState({});
   const [codeView, setCodeView] = useState('source');
+  const [models, setModels] = useState([]);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelErr, setModelErr] = useState('');
   const chatRef = useRef(null);
   const importRef = useRef(null);
 
@@ -163,7 +167,64 @@ export default function Page() {
     if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
   }, [messages, streamText, busy, asking, clarify]);
 
+  // Muat daftar model otomatis dari base URL (debounce biar tidak spam saat mengetik).
+  useEffect(() => {
+    if (!hydrated) return;
+
+    if (!settings.apiKey.trim()) {
+      setModels([]);
+      setModelErr('');
+      setModelBusy(false);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+      setModelBusy(true);
+      setModelErr('');
+      try {
+        const list = await listModels({
+          provider: settings.provider,
+          baseUrl: settings.baseUrl,
+          apiKey: settings.apiKey
+        });
+        if (cancelled) return;
+        setModels(list);
+      } catch (e) {
+        if (cancelled) return;
+        setModels([]);
+        setModelErr(e.message || 'Gagal memuat daftar model.');
+      } finally {
+        if (!cancelled) setModelBusy(false);
+      }
+    }, MODEL_DEBOUNCE);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // sengaja tidak memakai settings.model: ganti model tidak perlu memuat ulang daftar
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, settings.provider, settings.baseUrl, settings.apiKey]);
+
   const previewHtml = useMemo(() => buildPreview(files), [files]);
+
+  // Opsi dropdown: hasil dari base URL, plus model tersimpan kalau belum ada di daftar.
+  const modelOptions = useMemo(() => {
+    const list = Array.isArray(models) ? models.slice() : [];
+    const current = settings.model.trim();
+    if (current && !list.some((m) => m.id === current)) {
+      list.unshift({ id: current, label: current });
+    }
+    return list;
+  }, [models, settings.model]);
+
+  const modelPlaceholder = !settings.apiKey.trim()
+    ? 'Isi API key dulu'
+    : modelBusy
+      ? 'Memuat model...'
+      : 'Model tidak tersedia';
 
   function changeSkills(next) {
     setSkillState(next);
@@ -181,6 +242,24 @@ export default function Page() {
     const next = { ...settings, [field]: value };
     setSettings(next);
     saveSettings(next);
+  }
+
+  async function reloadModels() {
+    if (!settings.apiKey.trim() || modelBusy) return;
+    setModelBusy(true);
+    setModelErr('');
+    try {
+      const list = await listModels({
+        provider: settings.provider,
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey
+      });
+      setModels(list);
+    } catch (e) {
+      setModelErr(e.message || 'Gagal memuat daftar model.');
+    } finally {
+      setModelBusy(false);
+    }
   }
 
   function clearDiffs() {
@@ -267,7 +346,7 @@ export default function Page() {
       return;
     }
     if (!settings.model.trim()) {
-      setError('Model belum diisi. Buka Setelan untuk mengisinya.');
+      setError('Model belum diisi. Pilih model di samping tombol Generate atau isi lewat Setelan.');
       return;
     }
 
@@ -786,6 +865,37 @@ export default function Page() {
                 Tanya dulu
               </label>
               <div className="spacer" />
+              <div className="model-pick">
+                <select
+                  className="model-select"
+                  value={modelOptions.length > 0 ? settings.model : ''}
+                  onChange={(e) => update('model', e.target.value)}
+                  disabled={modelOptions.length === 0}
+                  title={
+                    modelBusy
+                      ? 'Memuat daftar model dari base URL...'
+                      : modelOptions.length > 0
+                        ? `${modelOptions.length} model dari ${settings.baseUrl.trim() || 'https://api.openai.com/v1'}`
+                        : modelPlaceholder
+                  }
+                >
+                  {modelOptions.length === 0 && <option value="">{modelPlaceholder}</option>}
+                  {modelOptions.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn ghost model-refresh"
+                  onClick={reloadModels}
+                  disabled={modelBusy || !settings.apiKey.trim()}
+                  title="Muat ulang daftar model"
+                >
+                  {modelBusy ? '...' : '⟳'}
+                </button>
+              </div>
               <button
                 type="button"
                 className="btn"
@@ -795,6 +905,7 @@ export default function Page() {
                 {asking ? 'Menyiapkan...' : busy ? 'Memproses...' : 'Generate'}
               </button>
             </div>
+            {modelErr && <div className="model-err">{modelErr}</div>}
           </div>
         </div>
 
