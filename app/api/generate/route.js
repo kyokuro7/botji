@@ -2,12 +2,54 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const OPENAI_BASE = 'https://api.openai.com/v1';
+const MAX_IMAGES = 4;
 
 function err(message, status = 400) {
   return new Response(JSON.stringify({ error: message }), {
     status,
     headers: { 'content-type': 'application/json' }
   });
+}
+
+function cleanImages(input) {
+  const list = Array.isArray(input) ? input : [];
+  return list
+    .filter((img) => img && typeof img.dataUrl === 'string' && /^data:image\/[a-z0-9.+-]+;base64,/i.test(img.dataUrl))
+    .slice(0, MAX_IMAGES);
+}
+
+function openAiContent(text, images) {
+  const parts = [];
+  if (text) parts.push({ type: 'text', text });
+  for (const img of images) {
+    parts.push({ type: 'image_url', image_url: { url: img.dataUrl } });
+  }
+  return parts;
+}
+
+function anthropicContent(text, images) {
+  const parts = [];
+  for (const img of images) {
+    const m = String(img.dataUrl).match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (!m) continue;
+    parts.push({ type: 'image', source: { type: 'base64', media_type: m[1].toLowerCase(), data: m[2] } });
+  }
+  if (text) parts.push({ type: 'text', text });
+  return parts;
+}
+
+// Lampirkan gambar ke pesan user terakhir.
+function attachImages(messages, images, provider) {
+  if (!images.length) return messages;
+
+  const list = messages.map((m) => ({ ...m }));
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i].role !== 'user') continue;
+    const text = String(list[i].content || '');
+    list[i].content = provider === 'anthropic' ? anthropicContent(text, images) : openAiContent(text, images);
+    break;
+  }
+  return list;
 }
 
 export async function POST(req) {
@@ -24,6 +66,7 @@ export async function POST(req) {
   const system = typeof body.system === 'string' ? body.system : '';
   const baseUrl = typeof body.baseUrl === 'string' ? body.baseUrl.trim() : '';
   const inputMessages = Array.isArray(body.messages) ? body.messages : [];
+  const images = cleanImages(body.images);
 
   if (!apiKey) return err('API key kosong.');
   if (!model) return err('Model kosong.');
@@ -34,6 +77,8 @@ export async function POST(req) {
     .filter((m) => m.content.length > 0);
 
   if (clean.length === 0) return err('Riwayat pesan kosong.');
+
+  const withImages = attachImages(clean, images, provider);
 
   let url;
   let headers;
@@ -51,7 +96,7 @@ export async function POST(req) {
       max_tokens: 8192,
       temperature: 0.3,
       stream: true,
-      messages: clean
+      messages: withImages
     };
     if (system) payload.system = system;
   } else {
@@ -65,7 +110,7 @@ export async function POST(req) {
       model,
       temperature: 0.3,
       stream: true,
-      messages: system ? [{ role: 'system', content: system }, ...clean] : clean
+      messages: system ? [{ role: 'system', content: system }, ...withImages] : withImages
     };
   }
 
