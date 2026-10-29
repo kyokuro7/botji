@@ -61,14 +61,42 @@ function dedupe(files) {
   return Array.from(map.values());
 }
 
-// Script pelindung yang disuntik ke preview.
-// Preview dirender lewat <iframe srcDoc>, yang basis URL-nya = URL aplikasi Studio ini.
-// Akibatnya link seperti href="#kontak", href="/", href="index.html" atau form submit
-// membuat iframe memuat ULANG halaman Studio (tampilan Studio jadi dobel di dalam preview),
-// dan link ke halaman lain (about.html, /tentang) menghasilkan 404.
-// Script ini mencegat navigasi tersebut supaya iframe tidak pernah berpindah halaman.
+// ===== preview multi halaman =====
+// Preview dirender lewat <iframe srcDoc>, yang basis URL-nya = URL aplikasi Studio.
+// Tanpa penanganan, link seperti href="about.html" membuat iframe memuat ULANG halaman
+// Studio (studio tampil dobel di dalam preview) dan link lain jadi 404.
+// Solusi: semua file .html digabung jadi satu peta halaman. Router di dalam iframe
+// mencegat klik link internal lalu menukar isi dokumen, jadi iframe tidak pernah
+// berpindah URL.
+
+function pageKey(path) {
+  return String(path || '')
+    .replace(/^(?:\.\/|\/)+/, '')
+    .toLowerCase();
+}
+
+function safeJson(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
 const PREVIEW_GUARD = `<script>
 (function () {
+  var dataEl = document.getElementById('__pv_pages');
+  var pages = {};
+  var current = 'index.html';
+
+  if (dataEl) {
+    try {
+      pages = JSON.parse(dataEl.textContent || '{}') || {};
+    } catch (e) {
+      pages = {};
+    }
+    current = dataEl.getAttribute('data-current') || current;
+  }
+
   function note(msg) {
     try {
       var n = document.getElementById('__pv_note');
@@ -81,59 +109,154 @@ const PREVIEW_GUARD = `<script>
       n.textContent = msg;
       n.style.opacity = '1';
       clearTimeout(n.__t);
-      n.__t = setTimeout(function () { n.style.opacity = '0'; }, 2200);
+      n.__t = setTimeout(function () { n.style.opacity = '0'; }, 2400);
     } catch (e) {}
   }
-  function toHash(h) {
-    if (!h || h === '#') { window.scrollTo({ top: 0, behavior: 'smooth' }); return true; }
-    var id = h.slice(1);
-    try { id = decodeURIComponent(id); } catch (e) {}
-    var el = document.getElementById(id) || document.getElementsByName(id)[0];
-    if (el) { el.scrollIntoView({ behavior: 'smooth' }); return true; }
-    return false;
+
+  function keyOf(value) {
+    var s = String(value || '').toLowerCase();
+    while (s.indexOf('./') === 0) s = s.slice(2);
+    while (s.indexOf('../') === 0) s = s.slice(3);
+    while (s.charAt(0) === '/') s = s.slice(1);
+    var q = s.indexOf('?');
+    if (q > -1) s = s.slice(0, q);
+    var h = s.indexOf('#');
+    if (h > -1) s = s.slice(0, h);
+    return s;
   }
-  document.addEventListener('click', function (e) {
-    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (!a) return;
-    var href = a.getAttribute('href') || '';
-    if (/^(javascript|mailto|tel|sms|data|blob):/i.test(href) || a.hasAttribute('download')) return;
-    e.preventDefault();
-    if (href.charAt(0) === '#') { toHash(href); return; }
-    if (/^https?:/i.test(href) || href.indexOf('//') === 0) {
-      window.open(a.href, '_blank', 'noopener');
+
+  function resolvePage(href) {
+    var path = keyOf(href);
+    if (!path) return null;
+
+    if (pages[path]) return path;
+    if (pages[path + '.html']) return path + '.html';
+    if (pages[path + '/index.html']) return path + '/index.html';
+
+    var dir = current.indexOf('/') > -1 ? current.slice(0, current.lastIndexOf('/') + 1) : '';
+    if (dir) {
+      var joined = keyOf(dir + path);
+      if (pages[joined]) return joined;
+      if (pages[joined + '.html']) return joined + '.html';
+    }
+
+    var base = path.split('/').pop();
+    if (base.indexOf('.') === -1) base = base + '.html';
+    for (var k in pages) {
+      if (k.split('/').pop() === base) return k;
+    }
+    return null;
+  }
+
+  function scrollToId(hash) {
+    var raw = String(hash || '');
+    var i = raw.indexOf('#');
+    var id = i > -1 ? raw.slice(i + 1) : raw;
+    if (!id || id === 'top') {
+      try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
       return;
     }
-    var i = href.indexOf('#');
-    if (i > -1 && toHash(href.slice(i))) return;
-    note('Link ke halaman lain dinonaktifkan di preview');
-  }, true);
-  document.addEventListener('submit', function (e) {
-    if (!e.defaultPrevented) {
-      e.preventDefault();
-      note('Form dinonaktifkan di preview');
+    try { id = decodeURIComponent(id); } catch (e) {}
+    var el = document.getElementById(id) || document.getElementsByName(id)[0];
+    if (el && el.scrollIntoView) {
+      try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { el.scrollIntoView(); }
     }
-  }, false);
+  }
+
+  function render(id, hash) {
+    var html = pages[id];
+    if (typeof html !== 'string') return false;
+    current = id;
+    try {
+      document.open();
+      document.write(html);
+      document.close();
+    } catch (e) {
+      note('Gagal pindah halaman di preview');
+      return false;
+    }
+    attach();
+    if (hash) setTimeout(function () { scrollToId(hash); }, 40);
+    else setTimeout(function () { try { window.scrollTo(0, 0); } catch (e) {} }, 0);
+    return true;
+  }
+
+  function onClick(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (!a) return;
+
+    var href = a.getAttribute('href') || '';
+    if (!href) return;
+
+    var low = href.toLowerCase();
+    if (
+      low.indexOf('javascript:') === 0 ||
+      low.indexOf('mailto:') === 0 ||
+      low.indexOf('tel:') === 0 ||
+      low.indexOf('sms:') === 0 ||
+      low.indexOf('data:') === 0 ||
+      low.indexOf('blob:') === 0
+    ) {
+      return;
+    }
+    if (a.hasAttribute('download')) return;
+
+    if (low.indexOf('http://') === 0 || low.indexOf('https://') === 0 || href.indexOf('//') === 0) {
+      e.preventDefault();
+      try { window.open(a.href, '_blank', 'noopener'); } catch (err) {}
+      return;
+    }
+
+    if (href.charAt(0) === '#') {
+      e.preventDefault();
+      scrollToId(href);
+      return;
+    }
+
+    var hashAt = href.indexOf('#');
+    var hash = hashAt > -1 ? href.slice(hashAt) : '';
+    var id = resolvePage(href);
+
+    if (id) {
+      e.preventDefault();
+      if (id === current) {
+        if (hash) scrollToId(hash);
+        else { try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (err) { window.scrollTo(0, 0); } }
+        return;
+      }
+      render(id, hash);
+      return;
+    }
+
+    if (hash) {
+      e.preventDefault();
+      scrollToId(hash);
+      return;
+    }
+
+    e.preventDefault();
+    note('Halaman "' + href + '" tidak ada di preview');
+  }
+
+  function onSubmit(e) {
+    if (e.defaultPrevented) return;
+    e.preventDefault();
+    note('Form dinonaktifkan di preview');
+  }
+
+  function attach() {
+    if (!document || !document.addEventListener) return;
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('submit', onSubmit, false);
+  }
+
+  attach();
 })();
 </script>
 `;
 
-export function buildPreview(files) {
-  if (!Array.isArray(files) || files.length === 0) return null;
-
-  const htmlFile = files.find((f) => /\.html?$/i.test(f.path));
-  if (!htmlFile) return null;
-
-  const css = files
-    .filter((f) => /\.css$/i.test(f.path))
-    .map((f) => f.content)
-    .join('\n\n');
-
-  const js = files
-    .filter((f) => /\.m?js$/i.test(f.path))
-    .map((f) => f.content)
-    .join('\n;\n');
-
-  let html = htmlFile.content;
+function inlineAssets(input, css, js) {
+  let html = String(input || '');
 
   html = html.replace(/<link[^>]*href=["'][^"']+\.css["'][^>]*>/gi, '');
   html = html.replace(/<script[^>]*src=["'][^"']+\.m?js["'][^>]*>\s*<\/script>/gi, '');
@@ -152,14 +275,48 @@ export function buildPreview(files) {
       : `${html}\n${scriptTag}`;
   }
 
-  // suntik pelindung navigasi sedini mungkin (setelah <head ...>, atau paling atas)
+  return html;
+}
+
+function injectRouter(pages, entryKey) {
+  const data = `<script type="application/json" id="__pv_pages" data-current="${entryKey}">${safeJson(pages)}</script>\n`;
+  const block = `${data}${PREVIEW_GUARD}`;
+  const html = pages[entryKey] || '';
+
   if (/<head[^>]*>/i.test(html)) {
-    html = html.replace(/<head[^>]*>/i, (m) => `${m}\n${PREVIEW_GUARD}`);
-  } else {
-    html = `${PREVIEW_GUARD}${html}`;
+    return html.replace(/<head[^>]*>/i, (m) => `${m}\n${block}`);
+  }
+  if (/<html[^>]*>/i.test(html)) {
+    return html.replace(/<html[^>]*>/i, (m) => `${m}\n${block}`);
+  }
+  return `${block}${html}`;
+}
+
+export function buildPreview(files) {
+  if (!Array.isArray(files) || files.length === 0) return null;
+
+  const htmlFiles = files.filter((f) => /\.html?$/i.test(f.path));
+  if (htmlFiles.length === 0) return null;
+
+  const css = files
+    .filter((f) => /\.css$/i.test(f.path))
+    .map((f) => f.content)
+    .join('\n\n');
+
+  const js = files
+    .filter((f) => /\.m?js$/i.test(f.path))
+    .map((f) => f.content)
+    .join('\n;\n');
+
+  const pages = {};
+  for (const f of htmlFiles) {
+    pages[pageKey(f.path)] = inlineAssets(f.content, css, js);
   }
 
-  return html;
+  const entryFile = htmlFiles.find((f) => /(^|\/)index\.html?$/i.test(f.path)) || htmlFiles[0];
+  const entryKey = pageKey(entryFile.path);
+
+  return injectRouter(pages, entryKey);
 }
 
 export function extractBotJson(files) {
