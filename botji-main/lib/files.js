@@ -62,12 +62,15 @@ function dedupe(files) {
 }
 
 // ===== preview multi halaman =====
-// Preview dirender lewat <iframe srcDoc>, yang basis URL-nya = URL aplikasi Studio.
-// Tanpa penanganan, link seperti href="about.html" membuat iframe memuat ULANG halaman
-// Studio (studio tampil dobel di dalam preview) dan link lain jadi 404.
-// Solusi: semua file .html digabung jadi satu peta halaman. Router di dalam iframe
-// mencegat klik link internal lalu menukar isi dokumen, jadi iframe tidak pernah
-// berpindah URL.
+// Preview dirender lewat <iframe srcDoc>, artinya basis URL dokumen = URL aplikasi Studio.
+// Tanpa penjagaan, link seperti href="tentang.html", href="?page=2", atau href="/kontak"
+// membuat iframe memuat ULANG halaman Studio (Studio tampil dobel di dalam preview).
+// Solusi:
+// 1. Semua file .html digabung jadi satu peta halaman.
+// 2. Script di dalam iframe mencegat link. Halaman internal dipindah dengan document.write,
+//    jadi iframe tidak pernah berpindah URL.
+// 3. Link yang tidak dikenali diblokir, bukan diteruskan ke browser.
+// 4. Link hash (#section) dibiarkan native supaya router JS di dalam halaman tetap jalan.
 
 function pageKey(path) {
   return String(path || '')
@@ -113,57 +116,114 @@ const PREVIEW_GUARD = `<script>
     } catch (e) {}
   }
 
-  function keyOf(value) {
-    var s = String(value || '').toLowerCase();
+  function strip(href) {
+    var s = String(href || '').toLowerCase().trim();
     while (s.indexOf('./') === 0) s = s.slice(2);
     while (s.indexOf('../') === 0) s = s.slice(3);
     while (s.charAt(0) === '/') s = s.slice(1);
-    var q = s.indexOf('?');
-    if (q > -1) s = s.slice(0, q);
     var h = s.indexOf('#');
     if (h > -1) s = s.slice(0, h);
+    var q = s.indexOf('?');
+    if (q > -1) s = s.slice(0, q);
     return s;
   }
 
-  function resolvePage(href) {
-    var path = keyOf(href);
+  function findPage(href) {
+    var path = strip(href);
     if (!path) return null;
-
     if (pages[path]) return path;
     if (pages[path + '.html']) return path + '.html';
     if (pages[path + '/index.html']) return path + '/index.html';
 
     var dir = current.indexOf('/') > -1 ? current.slice(0, current.lastIndexOf('/') + 1) : '';
     if (dir) {
-      var joined = keyOf(dir + path);
+      var joined = strip(dir + path);
       if (pages[joined]) return joined;
       if (pages[joined + '.html']) return joined + '.html';
     }
 
     var base = path.split('/').pop();
-    if (base.indexOf('.') === -1) base = base + '.html';
-    for (var k in pages) {
-      if (k.split('/').pop() === base) return k;
-    }
+    if (base && base.indexOf('.') === -1 && pages[base + '.html']) return base + '.html';
     return null;
   }
 
-  function scrollToId(hash) {
-    var raw = String(hash || '');
-    var i = raw.indexOf('#');
-    var id = i > -1 ? raw.slice(i + 1) : raw;
-    if (!id || id === 'top') {
-      try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) { window.scrollTo(0, 0); }
-      return;
-    }
-    try { id = decodeURIComponent(id); } catch (e) {}
-    var el = document.getElementById(id) || document.getElementsByName(id)[0];
-    if (el && el.scrollIntoView) {
-      try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { el.scrollIntoView(); }
+  function decode(value) {
+    try {
+      return decodeURIComponent(String(value || '').replace(/\+/g, ' '));
+    } catch (e) {
+      return String(value || '');
     }
   }
 
-  function render(id, hash) {
+  function idFrom(href) {
+    var s = String(href || '').trim();
+
+    var hash = s.indexOf('#');
+    if (hash > -1) {
+      var fromHash = decode(s.slice(hash + 1));
+      if (fromHash) return fromHash;
+    }
+
+    var q = s.indexOf('?');
+    if (q > -1) {
+      var params = s.slice(q + 1).split('&');
+      for (var i = 0; i < params.length; i += 1) {
+        var eq = params[i].indexOf('=');
+        if (eq < 0) continue;
+        var key = decode(params[i].slice(0, eq)).toLowerCase();
+        var val = decode(params[i].slice(eq + 1));
+        if (!val) continue;
+        if (
+          key === 'page' ||
+          key === 'p' ||
+          key === 'halaman' ||
+          key === 'view' ||
+          key === 'section' ||
+          key === 'tab' ||
+          key === 'id' ||
+          key === 'route' ||
+          key === 'screen' ||
+          key === 'menu'
+        ) {
+          return val;
+        }
+      }
+    }
+
+    return '';
+  }
+
+  function goHash(raw) {
+    var id = String(raw || '').replace(/^#/, '').trim();
+    if (!id) return false;
+
+    var el =
+      document.getElementById(id) ||
+      document.getElementById(id.toLowerCase()) ||
+      document.getElementsByName(id)[0];
+
+    if (!el) {
+      var low = id.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+      el =
+        document.getElementById(low) ||
+        document.getElementById('page-' + low) ||
+        document.getElementById('section-' + low) ||
+        document.getElementById('halaman-' + low);
+    }
+
+    if (el && el.scrollIntoView) {
+      try {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch (e) {
+        el.scrollIntoView();
+      }
+      return true;
+    }
+
+    return false;
+  }
+
+  function render(id) {
     var html = pages[id];
     if (typeof html !== 'string') return false;
     current = id;
@@ -175,20 +235,34 @@ const PREVIEW_GUARD = `<script>
       note('Gagal pindah halaman di preview');
       return false;
     }
-    attach();
-    if (hash) setTimeout(function () { scrollToId(hash); }, 40);
-    else setTimeout(function () { try { window.scrollTo(0, 0); } catch (e) {} }, 0);
+    try {
+      window.scrollTo(0, 0);
+    } catch (e) {}
     return true;
   }
 
   function onClick(e) {
+    if (e.defaultPrevented) return;
+
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (!a) return;
 
-    var href = a.getAttribute('href') || '';
-    if (!href) return;
+    var href = a.getAttribute('href');
+    if (href === null) return;
+    href = String(href);
 
-    var low = href.toLowerCase();
+    if (!href.trim()) {
+      e.preventDefault();
+      try {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (err) {
+        window.scrollTo(0, 0);
+      }
+      return;
+    }
+
+    var low = href.toLowerCase().trim();
+
     if (
       low.indexOf('javascript:') === 0 ||
       low.indexOf('mailto:') === 0 ||
@@ -199,43 +273,48 @@ const PREVIEW_GUARD = `<script>
     ) {
       return;
     }
+
     if (a.hasAttribute('download')) return;
 
     if (low.indexOf('http://') === 0 || low.indexOf('https://') === 0 || href.indexOf('//') === 0) {
       e.preventDefault();
-      try { window.open(a.href, '_blank', 'noopener'); } catch (err) {}
+      try {
+        window.open(a.href, '_blank', 'noopener');
+      } catch (err) {}
       return;
     }
 
-    if (href.charAt(0) === '#') {
-      e.preventDefault();
-      scrollToId(href);
-      return;
-    }
+    // hash murni: serahkan ke browser dan router JS di dalam halaman
+    if (href.charAt(0) === '#') return;
 
-    var hashAt = href.indexOf('#');
-    var hash = hashAt > -1 ? href.slice(hashAt) : '';
-    var id = resolvePage(href);
-
-    if (id) {
+    var page = findPage(href);
+    if (page) {
       e.preventDefault();
-      if (id === current) {
-        if (hash) scrollToId(hash);
-        else { try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (err) { window.scrollTo(0, 0); } }
+      if (page === current) {
+        try {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch (err) {
+          window.scrollTo(0, 0);
+        }
         return;
       }
-      render(id, hash);
+      render(page);
       return;
     }
 
-    if (hash) {
-      e.preventDefault();
-      scrollToId(hash);
-      return;
-    }
-
+    // bukan file halaman: coba petakan ke id elemen (query string / route)
     e.preventDefault();
-    note('Halaman "' + href + '" tidak ada di preview');
+
+    var id = idFrom(href);
+    if (id && goHash(id)) return;
+
+    var path = strip(href);
+    if (path) {
+      var last = path.split('/').pop();
+      if (last && goHash(last)) return;
+    }
+
+    note('Tautan "' + href + '" tidak bisa dibuka di preview');
   }
 
   function onSubmit(e) {
@@ -244,13 +323,16 @@ const PREVIEW_GUARD = `<script>
     note('Form dinonaktifkan di preview');
   }
 
-  function attach() {
-    if (!document || !document.addEventListener) return;
-    document.addEventListener('click', onClick, true);
-    document.addEventListener('submit', onSubmit, false);
+  function onBeforeUnload(e) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
   }
 
-  attach();
+  // listener dipasang di window, bukan document, karena document.write tidak menghapus listener window
+  window.addEventListener('click', onClick, true);
+  window.addEventListener('submit', onSubmit, false);
+  window.addEventListener('beforeunload', onBeforeUnload, false);
 })();
 </script>
 `;
