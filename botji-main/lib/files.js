@@ -61,44 +61,57 @@ function dedupe(files) {
   return Array.from(map.values());
 }
 
-// ===== preview multi halaman =====
-// Preview dirender lewat <iframe srcDoc>, artinya basis URL dokumen = URL aplikasi Studio.
-// Tanpa penjagaan, link seperti href="tentang.html", href="?page=2", atau href="/kontak"
-// membuat iframe memuat ULANG halaman Studio (Studio tampil dobel di dalam preview).
-// Solusi:
-// 1. Semua file .html digabung jadi satu peta halaman.
-// 2. Script di dalam iframe mencegat link. Halaman internal dipindah dengan document.write,
-//    jadi iframe tidak pernah berpindah URL.
-// 3. Link yang tidak dikenali diblokir, bukan diteruskan ke browser.
-// 4. Link hash (#section) dibiarkan native supaya router JS di dalam halaman tetap jalan.
+// ===== preview =====
+// Preview dirender lewat <iframe srcDoc>. Dokumen srcDoc mewarisi base URL
+// dari halaman induk (aplikasi Studio ini). Akibatnya href="#halaman2",
+// location.hash = '#halaman2', href="tentang.html", atau href="/" diresolve
+// ke URL Studio, lalu iframe memuat ULANG halaman Studio (Studio tampil dobel
+// di dalam preview).
+//
+// Perbaikan utama: suntik <base href="about:srcdoc"> ke setiap halaman.
+// Semua URL relatif dan hash lalu diresolve ke dokumen preview sendiri,
+// bukan ke domain Studio.
+//
+// Router di dalam iframe menangani pindah antar file .html, dan memblokir
+// tautan yang tidak ada di preview supaya iframe tidak pernah keluar dokumen.
 
 function pageKey(path) {
   return String(path || '')
     .replace(/^(?:\.\/|\/)+/, '')
+    .replace(/\\/g, '/')
     .toLowerCase();
 }
 
 function safeJson(value) {
   return JSON.stringify(value)
     .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
 }
 
+const PREVIEW_BASE = '<base href="about:srcdoc">';
+
 const PREVIEW_GUARD = `<script>
 (function () {
+  var selfSource = document.currentScript ? document.currentScript.textContent : '';
+
   var dataEl = document.getElementById('__pv_pages');
   var pages = {};
+  var json = '{}';
   var current = 'index.html';
 
   if (dataEl) {
+    json = dataEl.textContent || '{}';
     try {
-      pages = JSON.parse(dataEl.textContent || '{}') || {};
+      pages = JSON.parse(json) || {};
     } catch (e) {
       pages = {};
     }
     current = dataEl.getAttribute('data-current') || current;
   }
+
+  var baseOk = String(document.baseURI || '').indexOf('about:') === 0;
 
   function note(msg) {
     try {
@@ -149,7 +162,7 @@ const PREVIEW_GUARD = `<script>
 
   function decode(value) {
     try {
-      return decodeURIComponent(String(value || '').replace(/\+/g, ' '));
+      return decodeURIComponent(String(value || '').replace(/\\+/g, ' '));
     } catch (e) {
       return String(value || '');
     }
@@ -160,7 +173,7 @@ const PREVIEW_GUARD = `<script>
 
     var hash = s.indexOf('#');
     if (hash > -1) {
-      var fromHash = decode(s.slice(hash + 1));
+      var fromHash = decode(s.slice(hash + 1)).trim();
       if (fromHash) return fromHash;
     }
 
@@ -171,7 +184,7 @@ const PREVIEW_GUARD = `<script>
         var eq = params[i].indexOf('=');
         if (eq < 0) continue;
         var key = decode(params[i].slice(0, eq)).toLowerCase();
-        var val = decode(params[i].slice(eq + 1));
+        var val = decode(params[i].slice(eq + 1)).trim();
         if (!val) continue;
         if (
           key === 'page' ||
@@ -181,9 +194,9 @@ const PREVIEW_GUARD = `<script>
           key === 'section' ||
           key === 'tab' ||
           key === 'id' ||
-          key === 'route' ||
           key === 'screen' ||
-          key === 'menu'
+          key === 'menu' ||
+          key === 'route'
         ) {
           return val;
         }
@@ -193,17 +206,28 @@ const PREVIEW_GUARD = `<script>
     return '';
   }
 
+  function scrollTop() {
+    try {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {
+      try {
+        window.scrollTo(0, 0);
+      } catch (err) {}
+    }
+  }
+
   function goHash(raw) {
     var id = String(raw || '').replace(/^#/, '').trim();
-    if (!id) return false;
+    if (!id || id === 'top') {
+      scrollTop();
+      return true;
+    }
 
-    var el =
-      document.getElementById(id) ||
-      document.getElementById(id.toLowerCase()) ||
-      document.getElementsByName(id)[0];
+    var plain = decode(id);
+    var el = document.getElementById(plain) || document.getElementsByName(plain)[0];
 
     if (!el) {
-      var low = id.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+      var low = plain.toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
       el =
         document.getElementById(low) ||
         document.getElementById('page-' + low) ||
@@ -215,7 +239,9 @@ const PREVIEW_GUARD = `<script>
       try {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       } catch (e) {
-        el.scrollIntoView();
+        try {
+          el.scrollIntoView();
+        } catch (err) {}
       }
       return true;
     }
@@ -227,41 +253,45 @@ const PREVIEW_GUARD = `<script>
     var html = pages[id];
     if (typeof html !== 'string') return false;
     current = id;
+
+    var head =
+      '<base href="about:srcdoc">' +
+      '<script type="application/json" id="__pv_pages" data-current="' + id + '">' + json + '<\\/script>' +
+      '<script>' + selfSource + '<\\/script>';
+
+    var out = html;
+    if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, function (m) { return m + head; });
+    else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, function (m) { return m + head; });
+    else out = head + out;
+
     try {
       document.open();
-      document.write(html);
+      document.write(out);
       document.close();
     } catch (e) {
       note('Gagal pindah halaman di preview');
       return false;
     }
-    try {
-      window.scrollTo(0, 0);
-    } catch (e) {}
+
+    scrollTop();
     return true;
   }
 
   function onClick(e) {
-    if (e.defaultPrevented) return;
-
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (!a) return;
 
     var href = a.getAttribute('href');
     if (href === null) return;
-    href = String(href);
+    href = String(href).trim();
 
-    if (!href.trim()) {
+    if (!href) {
       e.preventDefault();
-      try {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } catch (err) {
-        window.scrollTo(0, 0);
-      }
+      scrollTop();
       return;
     }
 
-    var low = href.toLowerCase().trim();
+    var low = href.toLowerCase();
 
     if (
       low.indexOf('javascript:') === 0 ||
@@ -284,37 +314,37 @@ const PREVIEW_GUARD = `<script>
       return;
     }
 
-    // hash murni: serahkan ke browser dan router JS di dalam halaman
-    if (href.charAt(0) === '#') return;
+    // hash: kalau base URL aman, biarkan native supaya router/:target halaman jalan
+    if (href.charAt(0) === '#') {
+      if (baseOk) return;
+      e.preventDefault();
+      goHash(href);
+      return;
+    }
 
     var page = findPage(href);
     if (page) {
       e.preventDefault();
       if (page === current) {
-        try {
-          window.scrollTo({ top: 0, behavior: 'smooth' });
-        } catch (err) {
-          window.scrollTo(0, 0);
-        }
+        scrollTop();
         return;
       }
       render(page);
       return;
     }
 
-    // bukan file halaman: coba petakan ke id elemen (query string / route)
     e.preventDefault();
 
     var id = idFrom(href);
-    if (id && goHash(id)) return;
+    if (id && goHash('#' + id)) return;
 
     var path = strip(href);
     if (path) {
       var last = path.split('/').pop();
-      if (last && goHash(last)) return;
+      if (last && goHash('#' + last)) return;
     }
 
-    note('Tautan "' + href + '" tidak bisa dibuka di preview');
+    note('Tautan "' + href + '" tidak tersedia di preview');
   }
 
   function onSubmit(e) {
@@ -323,16 +353,31 @@ const PREVIEW_GUARD = `<script>
     note('Form dinonaktifkan di preview');
   }
 
-  function onBeforeUnload(e) {
-    e.preventDefault();
-    e.returnValue = '';
-    return '';
-  }
+  try {
+    var hist = window.history;
+    if (hist && typeof hist.pushState === 'function' && !hist.__pvPatched) {
+      hist.__pvPatched = true;
+      var push = hist.pushState;
+      var replace = hist.replaceState;
+      hist.pushState = function () {
+        try {
+          return push.apply(hist, arguments);
+        } catch (e) {
+          return undefined;
+        }
+      };
+      hist.replaceState = function () {
+        try {
+          return replace.apply(hist, arguments);
+        } catch (e) {
+          return undefined;
+        }
+      };
+    }
+  } catch (e) {}
 
-  // listener dipasang di window, bukan document, karena document.write tidak menghapus listener window
-  window.addEventListener('click', onClick, true);
-  window.addEventListener('submit', onSubmit, false);
-  window.addEventListener('beforeunload', onBeforeUnload, false);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('submit', onSubmit, false);
 })();
 </script>
 `;
@@ -360,18 +405,16 @@ function inlineAssets(input, css, js) {
   return html;
 }
 
-function injectRouter(pages, entryKey) {
-  const data = `<script type="application/json" id="__pv_pages" data-current="${entryKey}">${safeJson(pages)}</script>\n`;
-  const block = `${data}${PREVIEW_GUARD}`;
-  const html = pages[entryKey] || '';
+function injectHead(html, head) {
+  const src = String(html || '');
 
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (m) => `${m}\n${block}`);
+  if (/<head[^>]*>/i.test(src)) {
+    return src.replace(/<head[^>]*>/i, (m) => `${m}\n${head}`);
   }
-  if (/<html[^>]*>/i.test(html)) {
-    return html.replace(/<html[^>]*>/i, (m) => `${m}\n${block}`);
+  if (/<html[^>]*>/i.test(src)) {
+    return src.replace(/<html[^>]*>/i, (m) => `${m}\n${head}`);
   }
-  return `${block}${html}`;
+  return `${head}\n${src}`;
 }
 
 export function buildPreview(files) {
@@ -398,7 +441,10 @@ export function buildPreview(files) {
   const entryFile = htmlFiles.find((f) => /(^|\/)index\.html?$/i.test(f.path)) || htmlFiles[0];
   const entryKey = pageKey(entryFile.path);
 
-  return injectRouter(pages, entryKey);
+  const dataScript = `<script type="application/json" id="__pv_pages" data-current="${entryKey}">${safeJson(pages)}</script>`;
+  const head = `${PREVIEW_BASE}\n${dataScript}\n${PREVIEW_GUARD}`;
+
+  return injectHead(pages[entryKey], head);
 }
 
 export function extractBotJson(files) {
