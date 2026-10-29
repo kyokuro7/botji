@@ -5,11 +5,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import BotSimulator from '../components/BotSimulator';
 import DesignModal from '../components/DesignModal';
 import SkillsModal from '../components/SkillsModal';
+import UploadModal from '../components/UploadModal';
 import { buildPreview, diffLines, extractBotJson, parseFiles, splitReply } from '../lib/files';
 import { buildDesignBlock, loadDesign, saveDesign, DEFAULT_DESIGN } from '../lib/design';
 import { getBotSystem, getClarifySystem, getWebsiteSystem } from '../lib/prompts';
 import { buildSkillBlock, loadSkillState, saveSkillState, skillsForMode } from '../lib/skills';
 import { DEFAULT_SETTINGS, listModels, loadSettings, saveSettings } from '../lib/settings';
+import { buildUploadBlock, readUpload, uploadsToFiles } from '../lib/upload';
 import { createZip } from '../lib/zip';
 
 const FENCE = '```';
@@ -18,6 +20,8 @@ const EXPORT_VERSION = 1;
 const BOT_LANGS = ['auto', 'javascript', 'python'];
 const MAX_QUESTIONS = 12;
 const MODEL_DEBOUNCE = 700;
+const UPLOAD_ACCEPT =
+  '.html,.htm,.css,.js,.mjs,.cjs,.jsx,.ts,.tsx,.json,.md,.txt,.py,.docx,.zip,.svg,.yml,.yaml,.png,.jpg,.jpeg,.webp,.gif,image/*,application/zip';
 
 function isBotJson(f) {
   return /(^|\/)bot\.json$/i.test(f.path);
@@ -131,8 +135,12 @@ export default function Page() {
   const [models, setModels] = useState([]);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelErr, setModelErr] = useState('');
+  const [uploads, setUploads] = useState([]);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [useVision, setUseVision] = useState(false);
   const chatRef = useRef(null);
   const importRef = useRef(null);
+  const uploadRef = useRef(null);
 
   useEffect(() => {
     setSettings(loadSettings());
@@ -226,6 +234,9 @@ export default function Page() {
       ? 'Memuat model...'
       : 'Model tidak tersedia';
 
+  const uploadCount = uploads.filter((u) => u.include !== false).length;
+  const hasImageUpload = uploads.some((u) => u.kind === 'image');
+
   function changeSkills(next) {
     setSkillState(next);
     saveSkillState(next);
@@ -279,6 +290,8 @@ export default function Page() {
     setActiveFile(0);
     setTab('preview');
     setMobileView('chat');
+    setUploads([]);
+    setUseVision(false);
     clearDiffs();
   }
 
@@ -297,7 +310,7 @@ export default function Page() {
       .join('\n\n');
   }
 
-  async function streamAI(system, history, onChunk) {
+  async function streamAI(system, history, onChunk, images) {
     const res = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -307,7 +320,8 @@ export default function Page() {
         model: settings.model,
         apiKey: settings.apiKey,
         system,
-        messages: history
+        messages: history,
+        images: Array.isArray(images) ? images : []
       })
     });
 
@@ -334,7 +348,71 @@ export default function Page() {
 
   function hasProject() {
     if (mode === 'telegram') return files.some(isBotJson) || !!bot;
-    return files.some((f) => /\.html?$/i.test(f.path));
+    return (
+      files.some((f) => /\.html?$/i.test(f.path)) ||
+      uploads.some((u) => u.include !== false && /\.html?$/i.test(u.path || ''))
+    );
+  }
+
+  async function addFiles(fileList) {
+    const list = Array.from(fileList || []);
+    if (!list.length) return;
+
+    setUploadBusy(true);
+    setError('');
+    const added = [];
+
+    try {
+      for (const file of list) {
+        const items = await readUpload(file);
+        for (const it of items) added.push(it);
+      }
+    } catch (e) {
+      setError(`Upload gagal: ${e.message || 'file tidak terbaca.'}`);
+    } finally {
+      setUploadBusy(false);
+    }
+
+    if (added.length > 0) {
+      setUploads((prev) => [...prev, ...added]);
+      setModal('upload');
+    }
+  }
+
+  function toggleUpload(id) {
+    setUploads((prev) => prev.map((u) => (u.id === id ? { ...u, include: u.include === false } : u)));
+  }
+
+  function removeUpload(id) {
+    setUploads((prev) => prev.filter((u) => u.id !== id));
+  }
+
+  function clearUploads() {
+    setUploads([]);
+    setUseVision(false);
+  }
+
+  function importProject() {
+    const next = uploadsToFiles(uploads);
+    if (!next.length) return;
+    if (files.length > 0 && !window.confirm('File project saat ini akan diganti file hasil upload. Lanjut?')) return;
+
+    const result = extractBotJson(next);
+    setFiles(next);
+    setBot(result.bot);
+    setActiveFile(0);
+    setTab('code');
+    setMobileView('result');
+    clearDiffs();
+    setModal('');
+  }
+
+  function visionPayload() {
+    if (!useVision) return [];
+    return uploads
+      .filter((u) => u.include !== false && u.kind === 'image' && u.dataUrl)
+      .slice(0, 4)
+      .map((u) => ({ name: u.path || u.name, dataUrl: u.dataUrl }));
   }
 
   async function submit() {
@@ -457,6 +535,7 @@ export default function Page() {
 
     const hasWebsite = files.some((f) => /\.html?$/i.test(f.path));
     const hasBotProject = files.some(isBotJson);
+    const attachBlock = buildUploadBlock(uploads);
 
     if (mode === 'website' && hasWebsite) {
       send = `Kode saat ini:\n\n${currentFilesDump()}\n\nPermintaan baru: ${text}\n\nKirim ulang SEMUA file secara lengkap.`;
@@ -468,7 +547,16 @@ export default function Page() {
       send = `bot.json saat ini:\n${FENCE}json\n${JSON.stringify(bot, null, 2)}\n${FENCE}\n\nPermintaan baru: ${text}\n\nBuat kode bot asli lengkap beserta bot.json.`;
     }
 
-    const history = [...messages, { role: 'user', content: text, send }];
+    if (attachBlock) {
+      send = `${send}\n\n${attachBlock}`;
+    }
+
+    const images = visionPayload();
+    const shownText = attachBlock
+      ? `${text}\n\n[${uploadCount} file upload dilampirkan${images.length ? `, ${images.length} gambar` : ''}]`
+      : text;
+
+    const history = [...messages, { role: 'user', content: shownText, send }];
 
     setMessages(history);
     setPrompt('');
@@ -487,7 +575,8 @@ export default function Page() {
       const acc = await streamAI(
         system,
         history.map((m) => ({ role: m.role, content: m.send || m.content })),
-        setStreamText
+        setStreamText,
+        images
       );
 
       setRawOutput(acc);
@@ -730,6 +819,19 @@ export default function Page() {
           onChange={importChat}
           style={{ display: 'none' }}
         />
+
+        <input
+          ref={uploadRef}
+          type="file"
+          multiple
+          accept={UPLOAD_ACCEPT}
+          onChange={(e) => {
+            const picked = e.target.files;
+            addFiles(picked);
+            e.target.value = '';
+          }}
+          style={{ display: 'none' }}
+        />
       </div>
 
       {hydrated && !settings.apiKey.trim() && (
@@ -746,7 +848,7 @@ export default function Page() {
             {messages.length === 0 && !busy && (
               <div className="empty">
                 {mode === 'website'
-                  ? 'Contoh: buat landing page portofolio dark mode, ada hero, skill, kontak.'
+                  ? 'Contoh: buat landing page portofolio dark mode, ada hero, skill, kontak. Atau upload ZIP project lalu minta perbaikan.'
                   : 'Contoh: bot toko online pakai index.js, menu katalog, cek ongkir, jam buka, kontak admin.'}
               </div>
             )}
@@ -847,6 +949,20 @@ export default function Page() {
                   <option value="javascript">JavaScript</option>
                   <option value="python">Python</option>
                 </select>
+              )}
+              <button
+                type="button"
+                className="btn ghost sm"
+                onClick={() => uploadRef.current && uploadRef.current.click()}
+                disabled={uploadBusy}
+                title="Upload file project, dokumen, ZIP, atau gambar"
+              >
+                {uploadBusy ? 'Membaca...' : `Upload${uploadCount > 0 ? ` (${uploadCount})` : ''}`}
+              </button>
+              {uploads.length > 0 && (
+                <button type="button" className="btn ghost sm" onClick={() => setModal('upload')}>
+                  File
+                </button>
               )}
               <button type="button" className="btn ghost sm" onClick={() => setModal('skills')}>
                 Skill{activeSkillCount > 0 ? ` (${activeSkillCount})` : ''}
@@ -1072,6 +1188,21 @@ export default function Page() {
         <SkillsModal mode={mode} state={skillState} onChange={changeSkills} onClose={() => setModal('')} />
       )}
       {modal === 'design' && <DesignModal design={design} onChange={changeDesign} onClose={() => setModal('')} />}
+      {modal === 'upload' && (
+        <UploadModal
+          items={uploads}
+          busy={uploadBusy}
+          useVision={useVision}
+          hasImage={hasImageUpload}
+          onPick={() => uploadRef.current && uploadRef.current.click()}
+          onToggle={toggleUpload}
+          onRemove={removeUpload}
+          onClear={clearUploads}
+          onImport={importProject}
+          onVision={setUseVision}
+          onClose={() => setModal('')}
+        />
+      )}
 
       <nav className="mobile-nav">
         <button
